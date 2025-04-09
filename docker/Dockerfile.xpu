@@ -87,7 +87,6 @@ RUN --mount=type=secret,id=github_token \
     conda install libsqlite=3.48.0 -y && \
     echo ". /miniforge3/bin/activate; conda activate py${PYTHON_VERSION_STRING}; . /opt/intel/oneapi/setvars.sh; cd /root/" >> /root/.bashrc;
 
-
 # Set the default shell to bash
 SHELL ["bash", "-c"]
 CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
