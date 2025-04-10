@@ -18,7 +18,7 @@ ENV PYTHON_VERSION=3.10
 
 
 # Set maintainer label
-LABEL maintainer="zhaoqiong.zheng@intel.com"
+LABEL maintainer = "zhaoqiong.zheng@intel.com"
 
 
 # Install Miniforge & PyTorch/Triton & build vllm/SGlang from source
@@ -86,5 +86,5 @@ RUN --mount=type=secret,id=github_token \
     echo ". /miniforge3/bin/activate; conda activate py${PYTHON_VERSION_STRING}; . /opt/intel/oneapi/setvars.sh; cd /root/" >> /root/.bashrc;
 
 # Set the default shell to bash
-SHELL ["bash", "-c"]
-CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
+SHELL["bash", "-c"]
+CMD["bash", "-c", "source /root/.bashrc && exec bash"]
