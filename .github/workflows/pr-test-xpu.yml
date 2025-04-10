@@ -58,7 +58,6 @@ jobs:
 
       - name: Run container
         run: |
-          docker rm -f ci_sglang_xpu || true  
           docker run -dt \
             --device /dev/dri/ \
             --name ci_sglang_xpu \
