@@ -1,41 +1,11 @@
 cmake_minimum_required(VERSION 3.19.2)
+project(sgl-kernel)
 
-set(CMAKE_C_COMPILER icx CACHE STRING "Intel C compiler")
-set(CMAKE_CXX_COMPILER icpx CACHE STRING "Intel C++ compiler")
-
-# —————————————————————————————————————————————
-execute_process(
-  COMMAND which icpx
-  OUTPUT_VARIABLE ICPCX_PATH
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-if(NOT ICPCX_PATH)
-  message(FATAL_ERROR "icpx not found in PATH; please source oneAPI setvars.sh or adjust your PATH")
-endif()
-message(STATUS "Found icpx at: ${ICPCX_PATH}")
-
-set(CMAKE_CXX_COMPILER "${ICPCX_PATH}"
-    CACHE STRING "Path to DPC++ compiler")
-
-get_filename_component(ICPCX_BIN   "${ICPCX_PATH}" DIRECTORY)  # bin
-get_filename_component(ICPCX_LINUX "${ICPCX_BIN}" DIRECTORY)   # root
-
-set(SYCL_CONFIG_DIR "${ICPCX_LINUX}/lib/cmake/IntelSYCL"
-    CACHE PATH "Auto-detected SYCLConfig.cmake directory")
-if(EXISTS "${SYCL_CONFIG_DIR}/IntelSYCLConfig.cmake")
-  message(STATUS "Auto-detected SYCL config dir: ${SYCL_CONFIG_DIR}")
-  list(APPEND CMAKE_PREFIX_PATH "${SYCL_CONFIG_DIR}")
-else()
-  message(WARNING "Could not find IntelSYCLConfig.cmake in ${SYCL_CONFIG_DIR}; you may need to install oneAPI or adjust SYCL_CONFIG_DIR")
-endif()
-# —————————————————————————————————————————————
-
-project(my_sycl_project LANGUAGES CXX)
-
-find_package(IntelSYCL REQUIRED)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_CXX_STANDARD 17)
 
 # Torch
-find_package(Python3 COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT} REQUIRED)
+find_package(Python COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT} REQUIRED)
 
 execute_process(
   COMMAND ${Python_EXECUTABLE}
@@ -44,63 +14,53 @@ execute_process(
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
-list(APPEND CMAKE_PREFIX_PATH ${TORCH_PY_PREFIX})
+message(STATUS ${TORCH_PY_PREFIX})
+list(APPEND CMAKE_PREFIX_PATH ${TORCH_PY_PREFIX}/Torch)
 find_package(Torch REQUIRED)
 
 include(FetchContent)
 
 # cutlass
 FetchContent_Declare(
-    repo-cutlass-fork
-    GIT_REPOSITORY https://github.com/codeplaysoftware/cutlass-fork.git
-    GIT_TAG        268d735eda8dbd27e12f0596f30be3e6edb2c8db
+    repo-cutlass-sycl
+    GIT_REPOSITORY https://github.com/codeplaysoftware/cutlass-sycl.git
+    GIT_TAG        ef9797f4327886ad231bfe853099ca022060c293
     GIT_SHALLOW    OFF
 )
-FetchContent_Populate(repo-cutlass-fork)
-
-# ccache option
-option(ENABLE_CCACHE "Whether to use ccache" ON)
-find_program(CCACHE_FOUND ccache)
-if(CCACHE_FOUND AND ENABLE_CCACHE AND DEFINED ENV{CCACHE_DIR})
-    message(STATUS "Building with CCACHE enabled")
-    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "ccache")
-    set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK "ccache")
-endif()
+FetchContent_Populate(repo-cutlass-sycl)
 
 include_directories(
-    ${PROJECT_SOURCE_DIR}/../../include
-    ${PROJECT_SOURCE_DIR}/../../csrc
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../csrc
     ${repo-cutlass-fork_SOURCE_DIR}/include
     ${repo-cutlass-fork_SOURCE_DIR}/tools/util/include
 )
 
+add_subdirectory(sycl)
+
 set(SOURCES
-    "${PROJECT_SOURCE_DIR}/awq_dequantize.cpp"
-    "${PROJECT_SOURCE_DIR}/torch_extension_sycl.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/torch_extension_sycl.cc"
 )
 
-Python3_add_library(common_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${SOURCES})
+message(STATUS "${SOURCES}")
 
-# SYCL related
-string(STRIP "${SYCL_CXX_FLAGS}" SYCL_CXX_FLAGS_STRIPPED)
-target_compile_options(common_ops PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:${SYCL_CXX_FLAGS_STRIPPED}>)
+add_library(host_obj OBJECT ${SOURCES})
+target_link_libraries(host_obj PRIVATE ${TORCH_LIBRARIES} c10 torch torch_cpu)
+target_include_directories(host_obj PRIVATE ${TORCH_INCLUDE_DIRS})
+target_include_directories(host_obj PRIVATE ${Python_INCLUDE_DIRS})
+target_link_libraries(host_obj PRIVATE ${Python_LIBRARIES})
 
-target_compile_definitions(common_ops PRIVATE Py_LIMITED_API=0x03090000)
+get_target_property(SYCL_OBJ_SOURCES sycl_obj SOURCES)
+message(STATUS "sycl_obj SOURCES: ${SYCL_OBJ_SOURCES}")
 
-target_include_directories(common_ops PRIVATE
-    PUBLIC ${SYCL_ROOT}/include/sycl
-    PUBLIC ${SYCL_ROOT}/include
+Python_add_library(common_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI
+    $<TARGET_OBJECTS:host_obj>
+    $<TARGET_OBJECTS:sycl_obj>
 )
-
-target_link_libraries(common_ops PRIVATE ${TORCH_LIBRARIES} ${SYCL_ROOT}/lib)
 
 # torch related
-target_include_directories(common_ops PRIVATE ${Python3_INCLUDE_DIRS})
-target_link_libraries(common_ops PRIVATE ${Python3_LIBRARIES})
-
+target_link_libraries(common_ops PRIVATE ${TORCH_LIBRARIES} c10 torch torch_cpu)
 target_include_directories(common_ops PRIVATE ${TORCH_INCLUDE_DIRS})
-target_link_libraries(common_ops PRIVATE ${TORCH_LIBRARIES} c10 torch torch_cpu ${SYCL_LIBRARY})
 
 # install
 install(TARGETS common_ops LIBRARY DESTINATION sgl_kernel)

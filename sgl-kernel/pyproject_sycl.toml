@@ -9,7 +9,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "sgl-kernel"
-version = "0.1.7"
+version = "0.0.8"
 description = "Kernel Library for SGLang"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -36,5 +36,6 @@ cmake.source-dir = "csrc/xpu"
 cmake.build-type = "Release"
 minimum-version = "build-system.requires"
 
+wheel.py-api = "cp39"
 wheel.license-files = []
 wheel.packages = ["python/sgl_kernel"]

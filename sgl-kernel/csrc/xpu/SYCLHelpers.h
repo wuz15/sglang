@@ -4,23 +4,23 @@
 
 template <typename ker_t, int dim>
 static inline void sycl_kernel_submit(::sycl::range<dim> range, ::sycl::queue q, ker_t ker) {
-  auto cgf = [&](::sycl::handler& cgh) { cgh.parallel_for<ker_t>(range, ker); };
-  q.submit(cgf);
+  q.parallel_for<ker_t>(range, ker);
 }
 
 // Additional convention of SYCL kernel configuration. Besides construct kernel
-// functor, SYCL has some additional conventions to be called during setuping
+// functor, SYCL has some additional conventions required during setup of
 // SYCL command group handler, e.g. declaring SYCL local accessor when the
 // kernel requires shared local memory usage. Helpers below help simpilfiy
 // submission of SYCL kernels requiring additional conventions.
 
-// Defining additional convention. Can use `sycl_kernel_submit` simply to
-// submit a kernel, if the kernel functor inherits from the struct below.
-// Since cannot offload non-device-copyable (sycl::is_device_copyable) kernel
-// functor, a structure has virtual function is non-device-copyable.
-// Using an empty class, the kernel functor derived by it will be required to
-// define member method `void convention(sycl::handler&)`, or fails in
-// compilation.
+// If a kernel functor defines additional SYCL requirements that must be added
+// during the submission, the kernel functor must define a method
+// 'sycl_ker_config_convention'  that takes a SYCL handler object.
+// Note that virtual functions cannot be used to enforce the convention
+// due to sycl::is_device_copyable restrictions
+// (https://registry.khronos.org/SYCL/specs/sycl-2020/html/sycl-2020.html#device-copyable),
+// so the code enforces this by requiring the struct to be a parent
+// of any functor used for the SYCL kernel submissions.
 struct __SYCL_KER_CONFIG_CONVENTION__ {};
 
 template <typename ker_t, int dim>
