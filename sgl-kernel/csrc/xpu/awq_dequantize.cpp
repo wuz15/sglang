@@ -1,7 +1,8 @@
 #include <ATen/ATen.h>
 #include <ATen/Parallel.h>
 #include <c10/xpu/XPUStream.h>
-#include <torch/python.h>
+#include <torch/all.h>
+// #include <torch/python.h>
 
 #include <cmath>
 #include <cstdint>

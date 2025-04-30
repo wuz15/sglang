@@ -35,7 +35,7 @@ project(my_sycl_project LANGUAGES CXX)
 find_package(IntelSYCL REQUIRED)
 
 # Torch
-find_package(Python COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT} REQUIRED)
+find_package(Python3 COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT} REQUIRED)
 
 execute_process(
   COMMAND ${Python_EXECUTABLE}
@@ -79,16 +79,14 @@ set(SOURCES
     "${PROJECT_SOURCE_DIR}/torch_extension_sycl.cc"
 )
 
-Python_add_library(common_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${SOURCES})
+Python3_add_library(common_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${SOURCES})
 
 # SYCL related
 string(STRIP "${SYCL_CXX_FLAGS}" SYCL_CXX_FLAGS_STRIPPED)
 target_compile_options(common_ops PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${SYCL_CXX_FLAGS_STRIPPED}>)
 
-target_compile_definitions(common_ops PRIVATE PYBIND11_COMPILE_TYPE="_gcc")
-target_compile_definitions(common_ops PRIVATE PYBIND11_STDLIB="_libstdcpp")
-target_compile_definitions(common_ops PRIVATE PYBIND11_ABI="_cxxabi1016")
+target_compile_definitions(common_ops PRIVATE Py_LIMITED_API=0x03090000)
 
 target_include_directories(common_ops PRIVATE
     PUBLIC ${SYCL_ROOT}/include/sycl
@@ -98,6 +96,9 @@ target_include_directories(common_ops PRIVATE
 target_link_libraries(common_ops PRIVATE ${TORCH_LIBRARIES} ${SYCL_ROOT}/lib)
 
 # torch related
+target_include_directories(common_ops PRIVATE ${Python3_INCLUDE_DIRS})
+target_link_libraries(common_ops PRIVATE ${Python3_LIBRARIES})
+
 target_include_directories(common_ops PRIVATE ${TORCH_INCLUDE_DIRS})
 target_link_libraries(common_ops PRIVATE ${TORCH_LIBRARIES} c10 torch torch_cpu ${SYCL_LIBRARY})
 
