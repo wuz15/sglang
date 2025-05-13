@@ -63,7 +63,6 @@ RUN --mount=type=secret,id=github_token \
     echo  "Installing Triton wheels..." && \
     pip install $TEMP_DIR/*.whl --root-user-action=ignore && \
     rm -rf $TEMP_DIR && \
-
     # Install vllm from source
 
     cd /root && \
