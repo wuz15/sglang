@@ -85,6 +85,7 @@ jobs:
             --output 32 \
             --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
             --trust-remote-code \
+            --mem-fraction-static 0.3 \
             --device xpu"
 
       - name: Cleanup container
