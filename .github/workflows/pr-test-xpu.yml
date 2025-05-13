@@ -1,10 +1,8 @@
 name: PR Test (XPU)
 
 on:
-  push:
-    branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, dev/intel_xpu_backend]
   workflow_dispatch:
 
 concurrency:
@@ -12,7 +10,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  rebase-pr-branch:  
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: pvc-1100
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }} 
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rebase PR branch onto target branch
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git fetch origin ${{ github.base_ref }} --depth=1
+          
+          git rebase origin/${{ github.base_ref }} || {
+            echo "Rebase failed, likely due to conflicts. Please rebase manually."
+            exit 1
+          }
+          
+          git push origin HEAD:${{ github.event.pull_request.head.ref }} --force
   build-and-test:
+    needs: rebase-pr-branch
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') &&
       github.event.pull_request.draft == false
     runs-on: pvc-1100
@@ -27,7 +50,11 @@ jobs:
 
       - name: Build Docker image
         run: |
-          echo "[Placeholder] to build docker images"
+          docker build --progress=plain --secret id=github_token,src=/home/sdp/github_token.txt \
+          --build-arg SG_LANG_REPO=${{ github.server_url }}/${{ github.event.pull_request.head.repo.full_name }}.git  \
+          --build-arg SG_LANG_BRANCH=${{ github.head_ref || github.ref_name }} \
+          -f ${{ github.workspace }}/docker/Dockerfile.xpu -t sglang_xpu:u2410 .
+
 
       - name: Run container
         run: |
@@ -39,6 +66,7 @@ jobs:
       - name: Install Dependency
         timeout-minutes: 20
         run: |
+          docker exec ci_sglang_xpu bash -c "cd /root/sglang/sgl-kernel && mv pyproject_sycl.toml pyproject.toml && /miniforge3/envs/py310/bin/python3 -m pip install -v ."
           docker exec ci_sglang_xpu /miniforge3/envs/py310/bin/python3 -m pip install --upgrade pip
           docker exec ci_sglang_xpu /miniforge3/envs/py310/bin/python3 -m pip install pytest expecttest ray
 
@@ -77,4 +105,4 @@ jobs:
             exit 1
           fi
           echo "All jobs completed successfully"
-          exit 0
+          exit 0s
