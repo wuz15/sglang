@@ -106,4 +106,4 @@ jobs:
             exit 1
           fi
           echo "All jobs completed successfully"
-          exit 0s
+          exit 0
