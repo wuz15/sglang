@@ -102,7 +102,7 @@ jobs:
             --trust-remote-code \
             --mem-fraction-static 0.3 \
             --device xpu"
-
+            
       - name: Cleanup container
         if: always()
         run: |
