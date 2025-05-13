@@ -50,7 +50,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build --progress=plain --secret id=github_token,src=/home/sdp/github_token.txt \
+          docker build --no-cache --progress=plain --secret id=github_token,src=/home/sdp/github_token.txt \
           --build-arg SG_LANG_REPO=${{ github.server_url }}/${{ github.event.pull_request.head.repo.full_name }}.git  \
           --build-arg SG_LANG_BRANCH=${{ github.head_ref || github.ref_name }} \
           -f ${{ github.workspace }}/docker/Dockerfile.xpu -t sglang_xpu:u2410 .
