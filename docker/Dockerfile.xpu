@@ -1,6 +1,5 @@
-
 # Usage: save your github_token in github_token.txt
-# docker build --secret id=github_token,src=github_token.txt  -t sglang:xpu_u2410 -f  Dockerfile.xpu --no-cache .
+# docker build -t sglang:xpu_u2410 -f  Dockerfile.xpu --no-cache .
 
 
 # default base image
