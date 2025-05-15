@@ -66,7 +66,7 @@ jobs:
       - name: Install Dependency
         timeout-minutes: 20
         run: |
-          docker exec ci_sglang_xpu bash -c "cd /root/sglang/sgl-kernel && mv pyproject.toml pyproject_bak.toml && mv setup_sycl.py setup.py && source /opt/intel/oneapi/setvars.sh && CC=icx CXX=icpx /miniforge3/envs/py310/bin/python3 -m pip install -v ."
+          docker exec ci_sglang_xpu bash -c "cd /root/sglang/sgl-kernel && mv pyproject.toml pyproject_bak.toml && source /opt/intel/oneapi/setvars.sh && CC=icx CXX=icpx /miniforge3/envs/py310/bin/python3 -m pip install -v ."
           docker exec ci_sglang_xpu /miniforge3/envs/py310/bin/python3 -m pip install --upgrade pip
           docker exec ci_sglang_xpu /miniforge3/envs/py310/bin/python3 -m pip install pytest expecttest ray
 
