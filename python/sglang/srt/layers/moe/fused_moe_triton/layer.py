@@ -251,6 +251,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             num_expert_group,
             custom_routing_function,
             correction_bias,
+            routed_scaling_factor=routed_scaling_factor
         )
 
     def forward_tpu(self, *args, **kwargs) -> torch.Tensor:

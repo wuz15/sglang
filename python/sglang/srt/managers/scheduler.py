@@ -2207,7 +2207,7 @@ class Scheduler(
 
     def start_profile(
         self, stage: Optional[ForwardMode] = None
-    ) -> ProfileReqOutput | None:
+    ):# -> ProfileReqOutput | None:
         stage_str = f" for {stage.__str__()}" if stage else ""
         logger.info(
             f"Profiling starts{stage_str}. Traces will be saved to: {self.torch_profiler_output_dir}",
@@ -2274,7 +2274,7 @@ class Scheduler(
 
     def stop_profile(
         self, stage: Optional[ForwardMode] = None
-    ) -> ProfileReqOutput | None:
+    ):# -> ProfileReqOutput | None:
         if not self.profile_in_progress:
             return ProfileReqOutput(
                 success=False,

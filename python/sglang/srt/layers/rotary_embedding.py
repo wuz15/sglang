@@ -1088,6 +1088,7 @@ def get_rope(
     rope_scaling: Optional[Dict[str, Any]] = None,
     dtype: Optional[torch.dtype] = None,
     partial_rotary_factor: float = 1.0,
+    device: Optional[str] = None,
 ) -> RotaryEmbedding:
     if dtype is None:
         dtype = torch.get_default_dtype()
@@ -1220,6 +1221,7 @@ def get_rope(
                     "mscale_all_dim",
                 )
             }
+            extra_kwargs["device"] = device
             rotary_emb = DeepseekScalingRotaryEmbedding(
                 head_size,
                 rotary_dim,
@@ -1381,6 +1383,7 @@ def get_rope_wrapper(
             rope_scaling,
             dtype,
             partial_rotary_factor,
+            device,
         )
 
     return get_rope_cpu(
