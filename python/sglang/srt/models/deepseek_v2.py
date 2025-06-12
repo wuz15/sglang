@@ -2138,7 +2138,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                     and w.dtype == torch.float8_e4m3fn
                 ):
                     dtype_to = torch.bfloat16
-                    if is_xpu:
+                    if is_xpu():
                         dtype_to = torch.float16
                     self_attn.w_kc = (
                         self_attn.w_kc.to(dtype_to) * self_attn.w_scale
