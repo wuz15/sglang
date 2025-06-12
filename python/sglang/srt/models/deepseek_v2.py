@@ -26,7 +26,7 @@ import torch.nn.functional as F
 from torch import nn
 from tqdm import tqdm
 from transformers import PretrainedConfig
-
+from sglang.srt.utils import is_xpu
 from sglang.srt.distributed import (
     get_tensor_model_parallel_world_size,
     parallel_state,
@@ -2134,8 +2134,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                         self_attn.w_scale *= 2.0
                 # TODO: remove this after adding FP8 support in bmm cpu kernel
                 if (
-                    w_kc.device == torch.device("cpu")
-                    and cpu_has_amx_support()
+                    ((w_kc.device == torch.device("cpu") and cpu_has_amx_support()) or is_xpu())
                     and w.dtype == torch.float8_e4m3fn
                 ):
                     self_attn.w_kc = (
