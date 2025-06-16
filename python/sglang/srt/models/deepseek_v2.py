@@ -830,10 +830,11 @@ class DeepseekV2AttentionMLA(nn.Module):
         # If we have self.fused_qkv_a_proj_with_mqa, we will choose the torch.ops.sgl_kernel.fused_qkv_proj_with_rope kernel
         # which requires self.w_kc and self.w_vc to be packed.
         # If not, we will use torch.bmm and weight shouldn't be packed in this case
-        if hasattr(self, "fused_qkv_a_proj_with_mqa"):
-            self.quant_method = PackWeightMethod(
-                weight_names=["w_kc", "w_vc"], transpose_dims=[[1, 2], [1, 2]]
-            )
+        # YC WA
+        # if hasattr(self, "fused_qkv_a_proj_with_mqa"):
+        #     self.quant_method = PackWeightMethod(
+        #         weight_names=["w_kc", "w_vc"], transpose_dims=[[1, 2], [1, 2]]
+        #     )
 
         self.qkv_proj_with_rope_is_int8 = (
             hasattr(self, "fused_qkv_a_proj_with_mqa")
@@ -869,6 +870,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             else:
                 if (
                     hasattr(self, "fused_qkv_a_proj_with_mqa")
+                    and hasattr(self, "use_intel_amx_backend") 
                     and self.use_intel_amx_backend
                 ):
                     return AttnForwardMethod.MLA_FUSED_ROPE_CPU
