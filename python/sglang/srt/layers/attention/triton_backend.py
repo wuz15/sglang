@@ -19,6 +19,10 @@ if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
     from sglang.srt.speculative.eagle_utils import EagleDraftInput, EagleVerifyInput
 
+import os
+enable_esimd_opt = bool(int(os.getenv("ENABLE_ESIMD_MLA_OPT", "0")))
+if enable_esimd_opt:
+    from sgl_kernel import esimd_kernel_uni
 
 @triton.jit
 def get_num_kv_splits_triton(
@@ -231,6 +235,8 @@ class TritonAttnBackend(AttentionBackend):
 
         self.device = model_runner.device
         self.device_core_count = get_device_core_count(model_runner.gpu_id)
+
+        self.printed_info_decode = False
 
     def get_num_kv_splits(
         self,
@@ -787,6 +793,33 @@ class TritonAttnBackend(AttentionBackend):
         )
         return o
 
+    def _run_sdpa_forward_decode_esimd(
+        self,
+        query: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        output: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        kv_indices: torch.Tensor,
+        attn_logits: torch.Tensor,
+        attn_lse: torch.Tensor,
+        num_kv_splits=None,
+        max_kv_splits=None,
+        sm_scale=None,
+        batch_size=1,
+    ):
+        if not hasattr(self, "sdp_tmp") or self.sdp_tmp.shape != torch.Size([query.shape[-2], 512, v_cache.shape[-1]]):
+            self.sdp_tmp = torch.empty(query.shape[-2], 512, v_cache.shape[-1], dtype=torch.float32, device=query.device) # max to alloc 
+
+        for batch_idx in range(batch_size):  # B
+            esimd_kernel_uni(
+                query, k_cache, v_cache, kv_indptr, kv_indices, self.sdp_tmp, output, output, output, output,
+                1013, query.shape[-2], k_cache.shape[-2], batch_idx,  k_cache.shape[-1], v_cache.shape[-1], 
+                0, 0, 0, 0,    
+                sm_scale, 1.0, 1.0, 1.0, 1.0)
+
+        return output
+
     def forward_decode(
         self,
         q: torch.Tensor,
@@ -818,20 +851,46 @@ class TritonAttnBackend(AttentionBackend):
             kv_indptr = self.forward_metadata.kv_indptr
             kv_indices = self.forward_metadata.kv_indices
 
-        self.decode_attention_fwd(
-            q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
-            forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
-            forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
-            o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
-            kv_indptr,
-            kv_indices,
-            self.forward_metadata.attn_logits,
-            self.forward_metadata.attn_lse,
-            self.forward_metadata.num_kv_splits,
-            self.max_kv_splits,
-            layer.scaling,
-            layer.logit_cap,
-        )
+        is_mla_absorb = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).data_ptr() == forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id).data_ptr()
+        if enable_esimd_opt and is_mla_absorb:
+            
+            if not self.printed_info_decode:
+                print("esimd MLA decode, shapes: q, k, v, o, kv_indptr, kv_indices", 
+                q.shape, forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).shape, forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id).shape,
+                 o.shape, kv_indptr.shape, kv_indices.shape)
+                self.printed_info_decode = True
+            B = kv_indptr.shape[0] - 1
+
+            self._run_sdpa_forward_decode_esimd(
+                q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
+                forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
+                forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
+                o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
+                kv_indptr,
+                kv_indices,
+                self.forward_metadata.attn_logits,
+                self.forward_metadata.attn_lse,
+                self.forward_metadata.num_kv_splits,
+                self.max_kv_splits,
+                layer.scaling,
+                B
+            )
+        else:
+            # print("mla triton")
+            self.decode_attention_fwd(
+                q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
+                forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
+                forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
+                o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
+                kv_indptr,
+                kv_indices,
+                self.forward_metadata.attn_logits,
+                self.forward_metadata.attn_lse,
+                self.forward_metadata.num_kv_splits,
+                self.max_kv_splits,
+                layer.scaling,
+                layer.logit_cap,
+            )
         return o
 
 
