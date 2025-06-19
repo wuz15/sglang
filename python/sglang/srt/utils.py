@@ -175,7 +175,7 @@ def is_cpu() -> bool:
     )
 
 
-_USE_CPU = False
+_USE_CPU = os.getenv("SGLANG_USE_CPU_ENGINE", "0") == "1"
 
 
 def use_cpu():
