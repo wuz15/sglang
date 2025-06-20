@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 import os
 enable_esimd_opt = bool(int(os.getenv("ENABLE_ESIMD_MLA_OPT", "0")))
 if enable_esimd_opt:
-    from sgl_kernel import esimd_kernel_uni
+    from sgl_kernel_esimd import esimd_kernel_uni
 
 @triton.jit
 def get_num_kv_splits_triton(

@@ -95,7 +95,7 @@ import os
 
 enable_esimd_opt = bool(int(os.getenv("ENABLE_ESIMD_FP8_GEMM_OPT", "0")))
 if enable_esimd_opt:
-    from sgl_kernel import esimd_kernel_uni
+    from sgl_kernel_esimd import esimd_kernel_uni
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
