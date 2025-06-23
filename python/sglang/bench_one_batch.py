@@ -89,6 +89,7 @@ class BenchArgs:
     log_decode_step: int = 0
     profile: bool = False
     profile_filename_prefix: str = "profile"
+    iterations: int = 1
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -122,6 +123,12 @@ class BenchArgs:
             default=BenchArgs.profile_filename_prefix,
             help="Prefix of the profiling file names. The full profiling result file(s) be "
             '"[profile_filename_prefix]_batch[batch_size]_input[input_len]_output[output_len].trace.json.gz"',
+        )
+        parser.add_argument(
+            "--iterations",
+            type=int,
+            default=BenchArgs.iterations,
+            help="Number of iterations to run in the latency benchmark. Default is 1.",
         )
 
     @classmethod
@@ -160,12 +167,45 @@ def load_model(server_args, port_args, tp_rank):
     return model_runner, tokenizer
 
 
-def prepare_inputs_for_correctness_test(bench_args, tokenizer):
+def prepare_inputs_for_correctness_test(bench_args, tokenizer, batch_size):
     prompts = [
+        """The Qwen3 Embedding model series is the latest proprietary model of the Qwen family, specifically designed for text embedding and ranking tasks. Building upon the dense foundational models of the Qwen3 series, it provides a comprehensive range of text embeddings and reranking models in various sizes (0.6B, 4B, and 8B). This series inherits the exceptional multilingual capabilities, long-text understanding, and reasoning skills of its foundational model. The Qwen3 Embedding series represents significant advancements in multiple text embedding and ranking tasks, including text retrieval, code retrieval, text classification, text clustering, and bitext mining.
+
+Exceptional Versatility: The embedding model has achieved state-of-the-art performance across a wide range of downstream application evaluations. The 8B size embedding model ranks No.1 in the MTEB multilingual leaderboard (as of June 5, 2025, score 70.58), while the reranking model excels in various text retrieval scenarios.
+
+Comprehensive Flexibility: The Qwen3 Embedding series offers a full spectrum of sizes (from 0.6B to 8B) for both embedding and reranking models, catering to diverse use cases that prioritize efficiency and effectiveness. Developers can seamlessly combine these two modules. Additionally, the embedding model allows for flexible vector definitions across all dimensions, and both embedding and reranking models support user-defined instructions to enhance performance for specific tasks, languages, or scenarios.
+
+Multilingual Capability: The Qwen3 Embedding series offer support for over 100 languages, thanks to the multilingual capabilites of Qwen3 models. This includes various programming languages, and provides robust multilingual, cross-lingual, and code retrieval capabilities.
+
+Model Overview
+Qwen3-Embedding-0.6B has the following features:
+
+Model Type: Text Embedding
+Supported Languages: 100+ Languages
+Number of Paramaters: 0.6B
+Context Length: 32k
+Embedding Dimension: Up to 1024, supports user-defined output dimensions ranging from 32 to 1024
+For more details, including benchmark evaluation, hardware requirements, and inference performance, please refer to our blog, GitHub.
+
+Qwen3 Embedding Series Model list
+Model Type	Models	Size	Layers	Sequence Length	Embedding Dimension	MRL Support	Instruction Aware
+Text Embedding	Qwen3-Embedding-0.6B	0.6B	28	32K	1024	Yes	Yes
+Text Embedding	Qwen3-Embedding-4B	4B	36	32K	2560	Yes	Yes
+Text Embedding	Qwen3-Embedding-8B	8B	36	32K	4096	Yes	Yes
+Text Reranking	Qwen3-Reranker-0.6B	0.6B	28	32K	-	-	Yes
+Text Reranking	Qwen3-Reranker-4B	4B	36	32K	-	-	Yes
+Text Reranking	Qwen3-Reranker-8B	8B	36	32K	-	-	Yes
+Note:
+
+MRL Support indicates whether the embedding model supports custom dimensions for the final embedding.
+Instruction Aware notes whether the embedding or reranking model supports customizing the input instruction according to different tasks.
+Our evaluation indicates that, for most downstream tasks, using instructions (instruct) typically yields an improvement of 1% to 5% compared to not using them. Therefore, we recommend that developers create tailored instructions specific to their tasks and scenarios. In multilingual contexts, we also advise users to write their instructions in English, as most instructions utilized during the model training process were originally written in English.
+""",
         "The capital of France is",
         "The capital of the United Kindom is",
         "Today is a sunny day and I like",
-    ]
+        "Sky is blue because",
+    ][:batch_size]
     input_ids = [tokenizer.encode(p) for p in prompts]
     sampling_params = SamplingParams(
         temperature=0,
@@ -256,6 +296,7 @@ def decode(input_token_ids, batch, model_runner):
     batch.output_ids = input_token_ids
     batch.prepare_for_decode()
     _maybe_prepare_dp_attn_batch(batch, model_runner)
+    _maybe_prepare_tbo_heto_batch(batch, model_runner)
     model_worker_batch = batch.get_model_worker_batch()
     forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
     logits_output, _ = model_runner.forward(forward_batch)
@@ -278,6 +319,17 @@ def _maybe_prepare_dp_attn_batch(batch: ScheduleBatch, model_runner):
         )
 
 
+def _maybe_prepare_tbo_heto_batch(batch: ScheduleBatch, model_runner):
+    if (
+        model_runner.server_args.enable_two_batch_overlap
+        and model_runner.server_args.two_batch_overlap_mode == "heto"
+        and batch.tbo_split_seq_index is None
+    ):
+        Scheduler.prepare_tbo_heto(
+            batch, model_runner.server_args.two_batch_overlap_mode
+        )
+
+
 def correctness_test(
     server_args,
     port_args,
@@ -292,7 +344,9 @@ def correctness_test(
     model_runner, tokenizer = load_model(server_args, port_args, tp_rank)
 
     # Prepare inputs
-    input_ids, reqs = prepare_inputs_for_correctness_test(bench_args, tokenizer)
+    input_ids, reqs = prepare_inputs_for_correctness_test(
+        bench_args, tokenizer, bench_args.batch_size[0]
+    )
     rank_print(f"\n{input_ids=}\n")
 
     if bench_args.cut_len > 0:
@@ -470,8 +524,11 @@ def latency_test(
 
     # Run the sweep
     result_list = []
-    for bs, il, ol in itertools.product(
-        bench_args.batch_size, bench_args.input_len, bench_args.output_len
+    for bs, il, ol, _ in itertools.product(
+        bench_args.batch_size,
+        bench_args.input_len,
+        bench_args.output_len,
+        [1] * bench_args.iterations,
     ):
         reqs = prepare_synthetic_inputs_for_latency_test(bs, il)
         ret = latency_test_run_once(

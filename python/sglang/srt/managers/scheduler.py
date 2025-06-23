@@ -135,7 +135,7 @@ from sglang.srt.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
-from sglang.srt.two_batch_overlap import TboDPAttentionPreparer
+from sglang.srt.two_batch_overlap import TboDPAttentionPreparer, compute_split_seq_index
 from sglang.srt.utils import (
     DeepEPMode,
     DynamicGradMode,
@@ -1343,6 +1343,9 @@ class Scheduler(
         if self.server_args.enable_dp_attention or self.server_args.enable_sp_layernorm:
             ret, _ = self.prepare_dp_attn_batch(ret)
 
+        if ret is not None and self.server_args.enable_two_batch_overlap:
+            ret = self.prepare_tbo_heto(ret, self.server_args.two_batch_overlap_mode)
+
         return ret
 
     def get_num_allocatable_reqs(self, running_bs):
@@ -1655,6 +1658,16 @@ class Scheduler(
             enable_deepep_moe=self.server_args.enable_deepep_moe,
             deepep_mode=DeepEPMode[self.server_args.deepep_mode],
         )
+
+    @staticmethod
+    def prepare_tbo_heto(local_batch: ScheduleBatch, tbo_model: str):
+        if local_batch.forward_mode.is_decode() and tbo_model == "heto":
+            local_batch.tbo_split_seq_index = compute_split_seq_index(
+                forward_mode=local_batch.forward_mode,
+                num_tokens=local_batch.input_ids.shape[0],
+                extend_lens=local_batch.extend_lens,
+            )
+        return local_batch
 
     @staticmethod
     def prepare_dp_attn_batch_raw(

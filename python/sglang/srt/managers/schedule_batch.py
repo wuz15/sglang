@@ -81,6 +81,7 @@ GLOBAL_SERVER_ARGS_KEYS = [
     "disable_radix_cache",
     "enable_dp_attention",
     "enable_two_batch_overlap",
+    "two_batch_overlap_mode",
     "enable_dp_lm_head",
     "enable_deepep_moe",
     "deepep_mode",
@@ -99,6 +100,9 @@ GLOBAL_SERVER_ARGS_KEYS = [
     "torchao_config",
     "triton_attention_reduce_in_fp32",
     "num_reserved_decode_tokens",
+    "enable_ep_moe_heto",
+    "enable_ep_moe"
+
 ]
 
 # Put some global args for easy access

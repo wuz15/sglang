@@ -536,7 +536,7 @@ class ModelRunner:
         )
 
         # This can reduce thread conflicts and speed up weight loading.
-        if self.device != "cpu":
+        if self.device != "cpu" and not self.server_args.enable_ep_moe_heto:
             torch.set_num_threads(1)
         if self.device == "cuda":
             if torch.cuda.get_device_capability()[0] < 8:

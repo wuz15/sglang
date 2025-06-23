@@ -58,16 +58,17 @@ class TboAttnBackend(AttentionBackend):
             spec_info=spec_info,
         )
 
-        self._init_forward_metadata_cuda_graph_children(
-            fn_name="init_forward_metadata_capture_cuda_graph",
-            bs=bs,
-            req_pool_indices=req_pool_indices,
-            seq_lens=seq_lens,
-            encoder_lens=encoder_lens,
-            forward_mode=forward_mode,
-            spec_info=spec_info,
-            capture_num_tokens=num_tokens,
-        )
+        if bs > 1:
+            self._init_forward_metadata_cuda_graph_children(
+                fn_name="init_forward_metadata_capture_cuda_graph",
+                bs=bs,
+                req_pool_indices=req_pool_indices,
+                seq_lens=seq_lens,
+                encoder_lens=encoder_lens,
+                forward_mode=forward_mode,
+                spec_info=spec_info,
+                capture_num_tokens=num_tokens,
+            )
 
     def init_forward_metadata_replay_cuda_graph(
         self,
@@ -91,17 +92,18 @@ class TboAttnBackend(AttentionBackend):
             seq_lens_cpu=seq_lens_cpu,
         )
 
-        self._init_forward_metadata_cuda_graph_children(
-            fn_name="init_forward_metadata_replay_cuda_graph",
-            bs=bs,
-            req_pool_indices=req_pool_indices,
-            seq_lens=seq_lens,
-            encoder_lens=encoder_lens,
-            forward_mode=forward_mode,
-            spec_info=spec_info,
-            replay_seq_lens_sum=seq_lens_sum,
-            replay_seq_lens_cpu=seq_lens_cpu,
-        )
+        if bs > 1:
+            self._init_forward_metadata_cuda_graph_children(
+                fn_name="init_forward_metadata_replay_cuda_graph",
+                bs=bs,
+                req_pool_indices=req_pool_indices,
+                seq_lens=seq_lens,
+                encoder_lens=encoder_lens,
+                forward_mode=forward_mode,
+                spec_info=spec_info,
+                replay_seq_lens_sum=seq_lens_sum,
+                replay_seq_lens_cpu=seq_lens_cpu,
+            )
 
     def _init_forward_metadata_cuda_graph_children(
         self,

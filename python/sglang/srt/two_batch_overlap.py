@@ -453,9 +453,11 @@ def model_forward_maybe_tbo(
     )
     layer_input_scatter_mode = layers[0].layer_scatter_modes.layer_input_mode
     operations_strategy = OperationsStrategy.init_new_tbo(
-        layers, forward_batch.global_forward_mode
+        layers,
+        forward_batch.global_forward_mode,
+        global_server_args_dict["two_batch_overlap_mode"],
     )
-    if enable_tbo:
+    if enable_tbo and forward_batch.batch_size > 1:
         return _model_forward_tbo(
             inputs=inputs,
             operations_strategy=operations_strategy,

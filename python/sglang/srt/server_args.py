@@ -193,6 +193,9 @@ class ServerArgs:
     enable_dp_attention: bool = False
     enable_dp_lm_head: bool = False
     enable_two_batch_overlap: bool = False
+    two_batch_overlap_mode: Optional[Literal["deepep", "heto"]] = "deepep"
+    enable_ep_moe_heto: bool = False
+    ep_moe_heto_gpu_experts: int = 1
     enable_torch_compile: bool = False
     torch_compile_max_bs: int = 32
     torchao_config: str = ""
@@ -1332,10 +1335,28 @@ class ServerArgs:
             help="Enable vocabulary parallel across the attention TP group to avoid all-gather across DP groups, optimizing performance under DP attention.",
         )
         parser.add_argument(
+            "--enable-ep-moe-heto",
+            action="store_true",
+            help="Enabling heto expert parallelism for moe. must be supplied with --enable-ep-moe",
+        )
+        parser.add_argument(
+            "--ep-moe-heto-gpu-experts",
+            type=int,
+            default=ServerArgs.ep_moe_heto_gpu_experts,
+            help="Number of gpu experts in heto EP moe. 0 means half, positive number mean gpu expert in lower range, negative means higher range. For exampl, 30 means 0~29 on GPU, -50 means 206~255 on GPU",
+        )
+        parser.add_argument(
             "--enable-two-batch-overlap",
             action="store_true",
             help="Enabling two micro batches to overlap.",
         )
+        parser.add_argument(
+            "--two-batch-overlap-mode",
+            type=str,
+            default=ServerArgs.two_batch_overlap_mode,
+            help="The model for two batch overlap, deepep mode will interleave compute and communicate in deepep implementation, heto mode will interleave CPU and GPU operations for heto pipe implementation.",
+        )
+
         parser.add_argument(
             "--enable-torch-compile",
             action="store_true",
