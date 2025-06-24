@@ -1343,7 +1343,7 @@ class ServerArgs:
             "--ep-moe-heto-gpu-experts",
             type=int,
             default=ServerArgs.ep_moe_heto_gpu_experts,
-            help="Number of gpu experts in heto EP moe. 0 means half, positive number mean gpu expert in lower range, negative means higher range. For exampl, 30 means 0~29 on GPU, -50 means 206~255 on GPU",
+            help="Number of gpu experts in heto EP moe. Positive number mean gpu expert in lower range, negative means higher range. For exampl, 30 means 0~29 on GPU, -50 means 206~255 on GPU.",
         )
         parser.add_argument(
             "--enable-two-batch-overlap",

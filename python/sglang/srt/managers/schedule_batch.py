@@ -86,6 +86,8 @@ GLOBAL_SERVER_ARGS_KEYS = [
     "enable_deepep_moe",
     "deepep_mode",
     "enable_ep_moe",
+    "enable_ep_moe_heto",
+    "ep_moe_heto_gpu_experts",
     "moe_dense_tp_size",
     "ep_dispatch_algorithm",
     "deepep_config",
@@ -101,8 +103,7 @@ GLOBAL_SERVER_ARGS_KEYS = [
     "triton_attention_reduce_in_fp32",
     "num_reserved_decode_tokens",
     "enable_ep_moe_heto",
-    "enable_ep_moe"
-
+    "enable_ep_moe",
 ]
 
 # Put some global args for easy access

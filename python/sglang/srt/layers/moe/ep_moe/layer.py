@@ -608,6 +608,7 @@ class EPMoESparse(EPMoE):
         renormalize: bool = True,
         use_grouped_topk: bool = False,
         num_expert_group: Optional[int] = None,
+        num_fused_shared_experts: int = 0,
         topk_group: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
         tp_size: Optional[int] = None,
@@ -647,6 +648,7 @@ class EPMoESparse(EPMoE):
             renormalize,
             use_grouped_topk,
             num_expert_group,
+            num_fused_shared_experts,
             topk_group,
             quant_config,
             1,  # create as if tp_size is 1 weights will be created as local_expert_count
@@ -755,6 +757,7 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
         renormalize: bool = True,
         use_grouped_topk: bool = False,
         num_expert_group: Optional[int] = None,
+        num_fused_shared_experts: int = 0,
         topk_group: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
         tp_size: Optional[int] = None,
@@ -784,6 +787,7 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
                 renormalize,
                 use_grouped_topk,
                 num_expert_group,
+                num_fused_shared_experts,
                 topk_group,
                 quant_config,
                 tp_size,
@@ -956,9 +960,6 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
             self.adhoc_cpu_result = torch.zeros_like(
                 hidden_states, device=self.device, pin_memory=True
             )
-            self.adhoc_gpu_result = torch.zeros_like(
-                hidden_states, device=hidden_states.device
-            )
             self.adhoc_hidden_states_cpu = hidden_states.to(
                 self.device, non_blocking=True
             )
@@ -1008,12 +1009,8 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
             torch.cuda.current_stream(hidden_states_device).cuda_stream
         )
 
-    def forward_to_gpu(self, hidden_states_shape, hidden_states_device, cpu_result):
-        bs = hidden_states_shape[0]
-        if torch.cuda.is_current_stream_capturing() or bs <= self.cached_tensors_size:
-            return cpu_result.to(hidden_states_device, non_blocking=True)
-        else:
-            return self.adhoc_gpu_result.copy_(cpu_result, non_blocking=True)
+    def forward_to_gpu(self, hidden_states_device, cpu_result):
+        return cpu_result.to(hidden_states_device, non_blocking=True)
 
     def forward(self):
         raise NotImplementedError("forward Not implemented")
@@ -1103,6 +1100,7 @@ class EPMoEHeto(EPMoESparse):
         renormalize: bool = True,
         use_grouped_topk: bool = False,
         num_expert_group: Optional[int] = None,
+        num_fused_shared_experts: int = 0,
         topk_group: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
         tp_size: Optional[int] = None,
@@ -1131,6 +1129,7 @@ class EPMoEHeto(EPMoESparse):
             renormalize,
             use_grouped_topk,
             num_expert_group,
+            num_fused_shared_experts,
             topk_group,
             quant_config,
             tp_size,
@@ -1153,6 +1152,7 @@ class EPMoEHeto(EPMoESparse):
                 renormalize,
                 use_grouped_topk,
                 num_expert_group,
+                num_fused_shared_experts,
                 topk_group,
                 quant_config,
                 tp_size,
@@ -1244,7 +1244,7 @@ class EPMoEHeto(EPMoESparse):
     ):
         if self.cpu_moe:
             cpu_result_on_gpu = self.cpu_moe.forward_to_gpu(
-                hidden_states_shape, hidden_states_device, cpu_result
+                hidden_states_device, cpu_result
             )
 
         if gpu_result is None:

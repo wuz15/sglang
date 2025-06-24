@@ -26,7 +26,7 @@ import torch.nn.functional as F
 from torch import nn
 from tqdm import tqdm
 from transformers import PretrainedConfig
-from sglang.srt.utils import is_xpu
+
 from sglang.srt.distributed import (
     get_tensor_model_parallel_world_size,
     parallel_state,
@@ -101,6 +101,7 @@ from sglang.srt.utils import (
     is_cuda,
     is_hip,
     is_non_idle_and_non_empty,
+    is_xpu,
     log_info_on_rank0,
 )
 
@@ -395,7 +396,7 @@ class DeepseekV2MoE(nn.Module):
         else:
             shared_output = self._forward_shared_experts(hidden_states)
             # router_logits: (num_tokens, n_experts)
-            
+
             final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
             )
@@ -627,7 +628,7 @@ class DeepseekV2MoE(nn.Module):
 
     def op_shared_experts_keep_state(self, state):
         hidden_states_mlp_input = state.hidden_states_mlp_input
-        if (self.n_share_experts_fusion == 0) and is_non_idle_and_non_empty(
+        if (self.num_fused_shared_experts == 0) and is_non_idle_and_non_empty(
             state.forward_batch.forward_mode, hidden_states_mlp_input
         ):
             state.shared_output = self.shared_experts(hidden_states_mlp_input)
@@ -957,7 +958,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             else:
                 if (
                     hasattr(self, "fused_qkv_a_proj_with_mqa")
-                    and hasattr(self, "use_intel_amx_backend") 
+                    and hasattr(self, "use_intel_amx_backend")
                     and self.use_intel_amx_backend
                 ):
                     return AttnForwardMethod.MLA_FUSED_ROPE_CPU
@@ -2232,18 +2233,14 @@ class DeepseekV2ForCausalLM(nn.Module):
                         self_attn.w_scale *= 2.0
                 # TODO: remove this after adding FP8 support in bmm cpu kernel
                 if (
-                    ((w_kc.device == torch.device("cpu") and cpu_has_amx_support()) or is_xpu())
-                    and w.dtype == torch.float8_e4m3fn
-                ):
+                    (w_kc.device == torch.device("cpu") and cpu_has_amx_support())
+                    or is_xpu()
+                ) and w.dtype == torch.float8_e4m3fn:
                     dtype_to = torch.bfloat16
                     if is_xpu() and not (w_kc.device == torch.device("cpu")):
                         dtype_to = torch.float16
-                    self_attn.w_kc = (
-                        self_attn.w_kc.to(dtype_to) * self_attn.w_scale
-                    )
-                    self_attn.w_vc = (
-                        self_attn.w_vc.to(dtype_to) * self_attn.w_scale
-                    )
+                    self_attn.w_kc = self_attn.w_kc.to(dtype_to) * self_attn.w_scale
+                    self_attn.w_vc = self_attn.w_vc.to(dtype_to) * self_attn.w_scale
             else:
                 num_tiles_k = self_attn.qk_nope_head_dim // weight_block_size[1]
                 num_tiles_n = self_attn.v_head_dim // weight_block_size[0]
