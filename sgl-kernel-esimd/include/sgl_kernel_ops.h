@@ -192,6 +192,36 @@ at::Tensor esimd_kernel_mul_lgrf(
     //double f4
     );
 
+at::Tensor esimd_kernel_uni_lgrf(
+    at::Tensor _p0,
+    at::Tensor _p1,
+    at::Tensor _p2,
+    at::Tensor _p3,
+    at::Tensor _p4,
+    at::Tensor _p5,
+    at::Tensor _p6,
+    at::Tensor _p7,
+    at::Tensor _p8,
+    at::Tensor _p9,
+
+    int64_t i0,
+    int64_t i1,
+    int64_t i2,
+    int64_t i3,
+    int64_t i4,
+    int64_t i5,
+    int64_t i6,
+    int64_t i7,
+    int64_t i8,
+    int64_t i9,
+
+    double f0,
+    double f1,
+    double f2,
+    double f3,
+    double f4
+    );
+
 void cutlass_scaled_fp4_mm(
     torch::Tensor& D,
     torch::Tensor const& A,

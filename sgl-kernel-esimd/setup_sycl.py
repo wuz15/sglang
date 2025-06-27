@@ -70,7 +70,7 @@ sources = [
 
 extra_compile_args = {
     "cxx": ["-O3", "-std=c++17"],
-    "sycl": ["-fsycl", "-ffast-math", "-fsycl-device-code-split=per_kernel", "-fsycl-targets=spir64_gen", "-Xs '-options -doubleGRF'"],
+    "sycl": ["-fsycl", "-ffast-math", "-fsycl-device-code-split=per_kernel", "-Xs '-options -doubleGRF'"],
 }
 
 ext_modules.append(

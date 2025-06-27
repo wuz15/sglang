@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 import os
 enable_esimd_opt = bool(int(os.getenv("ENABLE_ESIMD_MLA_OPT", "0")))
 if enable_esimd_opt:
-    from sgl_kernel_esimd import esimd_kernel_uni
+    from sgl_kernel_esimd import esimd_kernel_uni, esimd_kernel_uni_lgrf
 
 @triton.jit
 def get_num_kv_splits_triton(
@@ -237,6 +237,7 @@ class TritonAttnBackend(AttentionBackend):
         self.device_core_count = get_device_core_count(model_runner.gpu_id)
 
         self.printed_info_decode = False
+        self.printed_info_prefill = False
 
     def get_num_kv_splits(
         self,
@@ -737,6 +738,57 @@ class TritonAttnBackend(AttentionBackend):
 
     def get_cuda_graph_seq_len_fill_value(self):
         return 1
+    
+    def _run_sdpa_forward_extend_esimd(
+        self,
+        query: torch.Tensor,
+        k_extend: torch.Tensor,
+        v_extend: torch.Tensor,
+        output: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        kv_indices: torch.Tensor,
+        extend_prefix_lens,
+        extend_seq_lens,
+        scaling=None,
+        enable_gqa=False,
+        causal=False,
+        batch_size=1,
+    ):
+        #breakpoint()
+
+        # [num_tokens, num_heads, head_size] -> [num_heads, num_tokens, head_size]
+        #query = query.movedim(0, query.dim() - 2)
+
+        start_q, start_kv = 0, 0
+        for batch_idx in range(batch_size):
+
+            extend_seq_len = extend_seq_lens[batch_idx]     
+            prefix_seq_len = extend_prefix_lens[batch_idx]  
+
+            end_q = start_q + extend_seq_len
+            end_kv = start_kv + prefix_seq_len
+
+            per_req_query = query[start_q:end_q, :, :]
+
+            per_req_tokens = kv_indices[start_kv:end_kv]
+            
+            per_req_key_ext = k_extend[start_q:end_q]
+            per_req_value_ext = v_extend[start_q:end_q]
+            
+            esimd_out = output[start_q:end_q, :, :]
+
+            esimd_kernel_uni_lgrf(
+                per_req_query, per_req_key_ext, per_req_value_ext,k_cache, v_cache, per_req_tokens, esimd_out, esimd_out, esimd_out, esimd_out,
+                1006, query.shape[-2], k_extend.shape[-2], extend_seq_len, prefix_seq_len, k_extend.shape[-1], v_extend.shape[-1], 
+                0, 0, 0,    
+                scaling, 1.0, 1.0, 1.0, 1.0)
+            
+            output[start_q:end_q, :, :] = esimd_out
+            
+            start_q, start_kv = end_q, end_kv
+        return output
+
 
     def forward_extend(
         self,
@@ -773,24 +825,58 @@ class TritonAttnBackend(AttentionBackend):
             kv_indptr = self.forward_metadata.kv_indptr
             kv_indices = self.forward_metadata.kv_indices
 
-        self.extend_attention_fwd(
-            q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
-            k.contiguous(),
-            v.contiguous(),
-            o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
-            forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
-            forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
-            self.forward_metadata.qo_indptr,
-            kv_indptr,
-            kv_indices,
-            self.forward_metadata.custom_mask,
-            causal,
-            self.forward_metadata.mask_indptr,
-            self.forward_metadata.max_extend_len,
-            layer.scaling,
-            layer.logit_cap,
-            sliding_window_size,
-        )
+        is_prefill = True
+        for prefix_len in forward_batch.extend_prefix_lens_cpu:
+            if prefix_len != 0:
+                is_prefill = False
+
+        if enable_esimd_opt and is_prefill:
+            if not self.printed_info_prefill:
+                print("esimd MLA prefill, shapes: q, k, v, o, kv_indptr, kv_indices", 
+                q.shape, forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).shape, forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id).shape,
+                 o.shape, kv_indptr.shape, kv_indices.shape)
+                self.printed_info_prefill = True
+            B = kv_indptr.shape[0] - 1
+        
+            Lq = q.view(-1, layer.tp_q_head_num, layer.qk_head_dim).shape[-1]
+            sm_scale = layer.scaling or 1.0 / (Lq**0.5)
+
+            self._run_sdpa_forward_extend_esimd(
+                q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
+                k.contiguous(),
+                v.contiguous(),
+                o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
+                forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
+                forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
+                kv_indices,
+                forward_batch.extend_prefix_lens_cpu,
+                forward_batch.extend_seq_lens_cpu,
+                scaling=sm_scale,
+                enable_gqa=True,
+                causal=True,
+                batch_size=B,
+            )
+
+            return o
+        else:
+            self.extend_attention_fwd(
+                q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
+                k.contiguous(),
+                v.contiguous(),
+                o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
+                forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
+                forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
+                self.forward_metadata.qo_indptr,
+                kv_indptr,
+                kv_indices,
+                self.forward_metadata.custom_mask,
+                causal,
+                self.forward_metadata.mask_indptr,
+                self.forward_metadata.max_extend_len,
+                layer.scaling,
+                layer.logit_cap,
+                sliding_window_size,
+            )
         return o
 
     def _run_sdpa_forward_decode_esimd(

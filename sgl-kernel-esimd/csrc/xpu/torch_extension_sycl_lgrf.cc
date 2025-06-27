@@ -25,10 +25,10 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel_esimd, m) {
   m.def("esimd_mul_lgrf(Tensor a, Tensor b, Tensor c, int flag, int len) -> Tensor");
   m.impl("esimd_mul_lgrf", torch::kXPU, &esimd_kernel_mul_lgrf);
 
-  //   m.def(
-  //       "fp8_blockwise_scaled_mm(Tensor mat_a, Tensor mat_b, Tensor scales_a, Tensor scales_b, ScalarType out_dtype,
-  //       -> Tensor");
-  //   m.impl("fp8_blockwise_scaled_mm", torch::kXPU, &fp8_blockwise_scaled_mm);
+  m.def("esimd_kernel_uni_lgrf(Tensor t0, Tensor t1, Tensor t2, Tensor t3, Tensor t4, Tensor t5, Tensor t6, Tensor t7, Tensor t8, Tensor t9, \
+                          int i0, int i1, int i2, int i3, int i4, int i5, int i6, int i7, int i8, int i9, \
+                          float f0, float f1, float f2, float f3, float f4) -> Tensor");
+  m.impl("esimd_kernel_uni_lgrf", torch::kXPU, &esimd_kernel_uni_lgrf);
 }
 
 REGISTER_EXTENSION(common_ops_lgrf)

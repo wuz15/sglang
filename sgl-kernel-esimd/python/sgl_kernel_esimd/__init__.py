@@ -18,7 +18,8 @@ from sgl_kernel_esimd.gemm import (
 from sgl_kernel_esimd.esimd_ops import (
     esimd_add,
     esimd_kernel_uni,
-    esimd_mul_lgrf
+    esimd_mul_lgrf,
+    esimd_kernel_uni_lgrf,
 )
 
 from sgl_kernel_esimd.version import __version__
