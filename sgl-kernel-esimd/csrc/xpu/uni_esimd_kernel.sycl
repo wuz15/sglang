@@ -13,6 +13,7 @@
 #include "esimd_kernels/esimd_add.h"
 #include "esimd_kernels/fp8_GEMV.h"
 #include "esimd_kernels/sdpa_norm.h"
+#include "esimd_kernels/rmsNorm.h"
 
 void esimd_add(uint8_t* a, uint8_t* b, uint8_t* c, int64_t len, sycl::queue& q){
     sycl::range<1> LocalRange(16); 
@@ -247,6 +248,84 @@ void wfp8_dequant_host(
 
   }
 
+#define BMM_GEMV_A16_WFP8_BLK_PARAMS \
+  input_data,    \
+  weight_data,   \
+  output_data,   \
+  M,             \
+  N,             \
+  K,             \
+  K_stride,      \
+  batch,         \
+  weight_scale,  \
+  q              \
+
+void BMM_GEMV_a16_wfp8_block_host(
+  uint8_t* input_data,
+  uint8_t* weight_data, 
+  uint8_t* output_data,
+  uint32_t M,
+  uint32_t N,
+  uint32_t K,
+  uint32_t K_stride,
+  uint32_t batch,
+  float weight_scale,
+  sycl::queue& q) {
+
+    // template<typename IT, uint32_t NT, uint32_t HD, uint32_t PPG, uint32_t MAX_INPUT_M>
+
+    if (M == 1)
+    {
+      if (K % 512 == 0)
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 256, 1, 1>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+      else // K % 128 == 0
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 128, 1, 1>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+    }
+    else if (M == 2)
+    {
+      if (K % 512 == 0)
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 256, 1, 2>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+      else // K % 128 == 0
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 128, 1, 2>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+    }
+    else if (M <= 4)
+    {
+      if (K % 512 == 0)
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 256, 1, 4>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+      else // K % 128 == 0
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 128, 1, 4>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+    }
+    else if (M <= 8)
+    {
+      if (K % 512 == 0)
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 256, 1, 8>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+      else // K % 128 == 0
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 128, 1, 8>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+    }
+    else
+    {
+      std::cout << "[BMM_GEMV_a16_wfp8_block] Not supported M N K batch " 
+      << M << " " <<  N << " " << K << " " << batch << " " << std::endl;
+    }
+  }
+
+
 
 void esimd_sdpa_normal_with_reduce(
     uint8_t* query,
@@ -275,6 +354,85 @@ void esimd_sdpa_normal_with_reduce(
   }
   sdp_esimd_kernel_with_reduce_fp16I_fp16O<576, 512, 256>(num_heads, num_heads_kv, batch_idx, query, key, value, (uint32_t*) kv_indptr, (uint32_t*)kv_indices, sdp_tmp, attn_mask, output, attn_scale, beta, dpcpp_queue);
 
+}
+
+void esimd_residual_kernel_rms_norm(
+  uint8_t* weight, uint8_t* residual, uint8_t* hidden_states, uint8_t* hidden_states_out,
+
+  int64_t hidden_size,  // hidden_size
+  int64_t input_len,  // input len
+  int64_t add_residual,  // add residual
+  float variance_epsilon,
+
+  sycl::queue& dpcpp_queue)
+{
+
+// int n_threads = hidden_size / 128;
+{
+  int threads = hidden_size / 128;
+
+  sycl::range<1> GlobalRange(input_len*threads); // input_len
+  sycl::range<1> LocalRange(threads);
+  sycl::nd_range<1> Range(GlobalRange, LocalRange);
+
+  sycl::event e;
+  try {
+    {
+        e = dpcpp_queue.submit([&](handler& cgh) {
+        cgh.parallel_for(Range, [=](nd_item<1> ndi) SYCL_ESIMD_KERNEL{
+          residual_rmsNorm128PerThread_64t(weight, residual, hidden_states, hidden_states_out, hidden_size, input_len, add_residual,  variance_epsilon, ndi);
+          });
+        });
+    }
+  } catch (sycl::exception const &e) {
+    std::cout << "SYCL exception caught: " << e.what() << '\n';
+    return;
+  }
+}
+}
+
+void esimd_residual_kernel_rms_norm_kq(
+  uint8_t* weight_q, uint8_t* weight_k, uint8_t* hidden_states_q, uint8_t* hidden_states_k,
+  uint8_t* hidden_states_out_q, uint8_t* hidden_states_out_k,
+
+  int64_t hidden_size_q,  // hidden_size
+  int64_t hidden_size_k,  // hidden_size
+  int64_t input_len,  // input len
+  float variance_epsilon_q,
+  float variance_epsilon_k,
+
+  sycl::queue& dpcpp_queue)
+{
+
+// int n_threads = hidden_size / 128;
+{
+  int threads_q = hidden_size_q / 128;
+  int threads_k = hidden_size_k / 128;
+  int threads = threads_q + threads_k;
+
+  sycl::range<1> GlobalRange(input_len*threads); // input_len
+  sycl::range<1> LocalRange(threads);
+  sycl::nd_range<1> Range(GlobalRange, LocalRange);
+
+  sycl::event e;
+  try {
+    {
+        e = dpcpp_queue.submit([&](handler& cgh) {
+        cgh.parallel_for(Range, [=](nd_item<1> ndi) SYCL_ESIMD_KERNEL{
+          qk_rmsNorm128PerThread_32t(weight_q, weight_k, hidden_states_q, hidden_states_k, hidden_states_out_q, hidden_states_out_k,
+            hidden_size_q,
+            hidden_size_k,
+            input_len,
+            variance_epsilon_q,
+            variance_epsilon_k, ndi);
+          });
+        });
+    }
+  } catch (sycl::exception const &e) {
+    std::cout << "SYCL exception caught: " << e.what() << '\n';
+    return;
+  }
+}
 }
 
 at::Tensor esimd_kernel_uni(
@@ -327,8 +485,17 @@ at::Tensor esimd_kernel_uni(
         case 4999:
           wfp8_dequant_host(p0, p1, p2, i1, i2, i3, i4, dpcpp_queue);
         break;
+        case 5001:
+          BMM_GEMV_a16_wfp8_block_host(p0, p1, p2, i1, i2, i3, i4, i5, f0, dpcpp_queue);
+        break;
         case 1013: 
           esimd_sdpa_normal_with_reduce(p0, p1, p2, p3, p4, p5, p6, p7, i1, i2, i3, i4, i5, f0, f1, dpcpp_queue);
+        break;
+        case 1108:   // rms norm w/ residual add
+          esimd_residual_kernel_rms_norm(p0, p1, p2, p3, i1, i2, i3, f0, dpcpp_queue);
+        break;
+        case 1109:   // rms norm w/ residual add
+          esimd_residual_kernel_rms_norm_kq(p0, p1, p2, p3, p4, p5, i1, i2, i3, f0, f1, dpcpp_queue);
         break;
         default:
           printf("---------- esimd kernel op not supported, op is %lld ----------\n", i0);

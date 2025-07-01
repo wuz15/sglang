@@ -426,9 +426,9 @@ class Fp8LinearMethod(LinearMethodBase):
         return tt.shape[-1] == tt.stride()[-2]
 
     def fp8_gemm_opt(self, input: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor, block_n=128, block_k=128, bias: torch.Tensor = None):
-        if not (self.is_k_contiguous(input) and self.is_k_contiguous(weight) and self.is_k_contiguous(weight_scale)):
-            print("fp8_gemm_opt shape not supported!")
-            return None
+        # if not (self.is_k_contiguous(input) and self.is_k_contiguous(weight) and self.is_k_contiguous(weight_scale)):
+        #     print("fp8_gemm_opt shape not supported!")
+        #     return None
         if weight.dtype != torch.float8_e4m3fn:
             print("fp8_gemm_opt type not supported!")
             return None
@@ -461,7 +461,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 print("running fp8 esimd GEMM opt kernel: M, N, K", M, " ", N, " ", K)
                 self.printed_info_gemm = True
 
-            dq_weight_fp16 = torch.zeros(weight.shape, dtype=torch.float16, device=weight.device)
+            dq_weight_fp16 = torch.empty(weight.shape, dtype=torch.float16, device=weight.device)
             esimd_kernel_uni(weight, weight_scale, dq_weight_fp16, dq_weight_fp16, dq_weight_fp16, dq_weight_fp16, dq_weight_fp16, dq_weight_fp16, dq_weight_fp16, dq_weight_fp16,
                 4999, N, K, block_n, block_k, 1, 1, 1, 1, 1, 1.0, 1.0, 1.0, 1.0, 1.0)
             # dequant and use FP16 GEMM
@@ -478,12 +478,12 @@ class Fp8LinearMethod(LinearMethodBase):
         batch = 1
         if len(input.shape) == 4:
             batch = input.shape[-3]
-            output = torch.zeros(input.shape[0], input.shape[1], M, N, device=input.device, dtype=input.dtype)
+            output = torch.empty(input.shape[0], input.shape[1], M, N, device=input.device, dtype=input.dtype)
         elif len(input.shape) == 3:
             batch = input.shape[-3]
-            output = torch.zeros(input.shape[0], M, N, device=input.device, dtype=input.dtype)
+            output = torch.empty(input.shape[0], M, N, device=input.device, dtype=input.dtype)
         elif len(input.shape) == 2:
-            output = torch.zeros(M, N, device=input.device, dtype=input.dtype)
+            output = torch.empty(M, N, device=input.device, dtype=input.dtype)
 
         esimd_kernel_uni(input, weight, weight_scale, bias_in, output, output, output, output, output, output,
             5000, M, N, K, batch, block_n, block_k, has_bias, 1, 1, 1.0, 1.0, 1.0, 1.0, 1.0)

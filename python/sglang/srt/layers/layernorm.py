@@ -41,6 +41,13 @@ if _use_aiter:
 elif _is_hip:
     from vllm._custom_ops import fused_add_rms_norm, rms_norm
 
+
+import os
+
+enable_esimd_opt = bool(int(os.getenv("ENABLE_ESIMD_NORM_ROPE_OPT", "0")))
+if enable_esimd_opt:
+    from sgl_kernel_esimd import esimd_kernel_uni
+
 logger = logging.getLogger(__name__)
 
 
@@ -101,6 +108,21 @@ class RMSNorm(CustomOp):
         rms_norm(out, x, self.weight.data, self.variance_epsilon)
         return out
 
+    def esimd_rmsNormFuse(self, hidden_states, seq_len, residual):
+        hidden_states_out = torch.empty_like(hidden_states)
+
+        add_residual = 0
+        residual_in = hidden_states
+        if residual is not None:
+            add_residual = 1
+            residual_in = residual
+        esimd_kernel_uni(
+            self.weight, residual_in, hidden_states, hidden_states_out, hidden_states_out, hidden_states_out,
+            hidden_states_out, hidden_states_out, hidden_states_out, hidden_states_out,  # weight, residual, hidden_states
+            1108, hidden_states.shape[-1], seq_len, add_residual, 0, 0, 0, 0, 0, 0, # hidden size, add_residual
+            self.variance_epsilon, 1.0, 1.0, 1.0, 1.0)   # self.variance_epsilon
+        return hidden_states_out
+
     def forward_native(
         self,
         x: torch.Tensor,
@@ -108,15 +130,18 @@ class RMSNorm(CustomOp):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if not x.is_contiguous():
             x = x.contiguous()
-        orig_dtype = x.dtype
-        x = x.to(torch.float32)
-        if residual is not None:
-            x = x + residual.to(torch.float32)
-            residual = x.to(orig_dtype)
+        if enable_esimd_opt:
+            x = self.esimd_rmsNormFuse(x, x.shape[-2], residual)
+        else:
+            orig_dtype = x.dtype
+            x = x.to(torch.float32)
+            if residual is not None:
+                x = x + residual.to(torch.float32)
+                residual = x.to(orig_dtype)
 
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = (x * self.weight).to(orig_dtype)
+            variance = x.pow(2).mean(dim=-1, keepdim=True)
+            x = x * torch.rsqrt(variance + self.variance_epsilon)
+            x = (x * self.weight).to(orig_dtype)
         if residual is None:
             return x
         else:

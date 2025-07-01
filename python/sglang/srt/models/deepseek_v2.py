@@ -130,8 +130,12 @@ if _is_hip:
 if _use_aiter:
     from aiter.rotary_embedding import get_rope
 
-logger = logging.getLogger(__name__)
+enable_esimd_norm_rope_opt = bool(int(os.getenv("ENABLE_ESIMD_NORM_ROPE_OPT", "0")))
+enable_esimd_bmm_opt = bool(int(os.getenv("ENABLE_ESIMD_FP8_GEMM_OPT", "0")))
+if enable_esimd_norm_rope_opt or enable_esimd_bmm_opt:
+    from sgl_kernel_esimd import esimd_kernel_uni
 
+logger = logging.getLogger(__name__)
 
 class AttnForwardMethod(IntEnum):
     # Use multi-head attention
@@ -942,6 +946,9 @@ class DeepseekV2AttentionMLA(nn.Module):
             self.weight_block_size = (
                 self.fused_qkv_a_proj_with_mqa.quant_method.quant_config.weight_block_size
             )
+        
+        self.print_bmm_kc = False
+        self.print_bmm_vc = False
 
     def dispatch_attn_forward_method(
         self, forward_batch: ForwardBatch
@@ -1154,6 +1161,56 @@ class DeepseekV2AttentionMLA(nn.Module):
         attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
         output, _ = self.o_proj(attn_output)
         return output
+    
+    def esimd_rmsNormFuse_kq(self, q, k):
+        q_out = torch.empty_like(q)
+        k_out = torch.empty_like(k)
+
+        if q.shape[-2] != k.shape[-2]:
+            print("k q norm fuse cannot work due to diff k and q len!")
+
+        if not k.is_contiguous():
+            k = k.contiguous()
+        if not q.is_contiguous():
+            q = q.contiguous()
+
+        esimd_kernel_uni(
+            self.q_a_layernorm.weight, self.kv_a_layernorm.weight, q, k, q_out, k_out,
+            k_out, k_out, k_out, k_out,  # weight, residual, hidden_states
+            1109, q.shape[-1], k.shape[-1], q.shape[-2], 0, 0, 0, 0, 0, 0, # hidden size, add_residual
+            self.q_a_layernorm.variance_epsilon, self.kv_a_layernorm.variance_epsilon, 1.0, 1.0, 1.0)   # self.variance_epsilon
+        return q_out, k_out
+    
+    def fp8_bmm_opt(self, input: torch.Tensor, weight: torch.Tensor, weight_scale, bias: torch.Tensor = None):
+        if weight.dtype != torch.float8_e4m3fn:
+            print("fp8_bmm_opt type not supported!")
+            return None
+
+        if bias is not None:
+            print("fp8_bmm_opt bias not supported!")
+            return None
+
+        # weight (b, K, N)    K leading
+        # input (M, b, K)    K leading with stride
+        if weight.shape[-2] != input.shape[-1]:
+            print("fp8_bmm_opt input weight k not same!")
+
+        M = input.shape[-3]
+        N = weight.shape[-1]
+        K = input.shape[-1]
+        K_stride = input.stride()[-2]
+
+        batch = 1
+        if len(input.shape) == 3:
+            batch = input.shape[-2]
+            output = torch.empty(input.shape[1], M, N, device=input.device, dtype=input.dtype)
+        else:
+            print("fp8_bmm_opt input shape not supported")
+
+        esimd_kernel_uni(input, weight, output, output, output, output, output, output, output, output,
+            5001, M, N, K, K_stride, batch, 1, 1, 1, 1, weight_scale, 1.0, 1.0, 1.0, 1.0)
+
+        return output
 
     def forward_absorb_prepare(
         self,
@@ -1179,8 +1236,11 @@ class DeepseekV2AttentionMLA(nn.Module):
                     k_nope = self.kv_a_layernorm(k_nope)
                 current_stream.wait_stream(self.alt_stream)
             else:
-                q = self.q_a_layernorm(q)
-                k_nope = self.kv_a_layernorm(k_nope)
+                if enable_esimd_norm_rope_opt:
+                    q, k_nope = self.esimd_rmsNormFuse_kq(q, k_nope)
+                else:
+                    q = self.q_a_layernorm(q)
+                    k_nope = self.kv_a_layernorm(k_nope)
 
             k_nope = k_nope.unsqueeze(1)
             q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
@@ -1225,7 +1285,13 @@ class DeepseekV2AttentionMLA(nn.Module):
                 q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
             )
         else:
-            q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
+            if enable_esimd_bmm_opt and q_nope.shape[0] <= 8:
+                if self.print_bmm_kc is False:
+                    print("fp8_bmm_esimd opt, q_nope, w_kc: ", q_nope.shape, self.w_kc_fp8.shape)
+                    self.print_bmm_kc = True
+                q_nope_out = self.fp8_bmm_opt(q_nope, self.w_kc_fp8, self.w_scale_item)
+            else:
+                q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
 
         q_nope_out = q_nope_out.transpose(0, 1)
         q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
@@ -1281,7 +1347,13 @@ class DeepseekV2AttentionMLA(nn.Module):
                 torch.bfloat16,
             )
         else:
-            attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
+            if enable_esimd_bmm_opt and attn_output.shape[0] <= 8:
+                if self.print_bmm_vc is False:
+                    print("fp8_bmm_esimd opt, attn_output, w_vc: ", attn_output.shape, self.w_vc_fp8.shape)
+                    self.print_bmm_vc = True
+                attn_bmm_output = self.fp8_bmm_opt(attn_output, self.w_vc_fp8, self.w_scale_item)
+            else:
+                attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
         attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
         output, _ = self.o_proj(attn_output)
 
@@ -2181,6 +2253,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                             weight, weight_scale, weight_block_size
                         )
                         self_attn.w_scale = scale
+
                 else:
                     if _is_fp8_fnuz:
                         weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
@@ -2239,6 +2312,10 @@ class DeepseekV2ForCausalLM(nn.Module):
                     dtype_to = torch.bfloat16
                     if is_xpu() and not (w_kc.device == torch.device("cpu")):
                         dtype_to = torch.float16
+                        self_attn.w_kc_fp8 = self_attn.w_kc
+                        self_attn.w_vc_fp8 = self_attn.w_vc
+                        self_attn.w_scale_item = self_attn.w_scale.item()
+
                     self_attn.w_kc = self_attn.w_kc.to(dtype_to) * self_attn.w_scale
                     self_attn.w_vc = self_attn.w_vc.to(dtype_to) * self_attn.w_scale
             else:
