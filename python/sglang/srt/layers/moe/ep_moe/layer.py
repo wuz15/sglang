@@ -819,9 +819,9 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
             topk_group,
         )
         self.cpu_moe_engine = None
-        self.dummy_correction_bias = torch.nn.Parameter(
-            torch.zeros_like(self.correction_bias.data, device=self.device),
-            requires_grad=False,
+        # CPUInfer doesn't need correction_bias but we need to keep the interface consistent
+        self.dummy_correction_bias = torch.zeros(
+            self.num_experts, device=self.device, dtype=torch.float
         )
         self.cpu_hidden_states = None
         self.cpu_sorted_topk_ids = None

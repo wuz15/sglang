@@ -56,6 +56,9 @@ DEFAULT_MODEL_NAME_FOR_MODELOPT_QUANT_ACCURACY_TEST_FP8 = (
     "nvidia/Llama-3.1-8B-Instruct-FP8"
 )
 
+# HeteroFlow test models
+DEFAULT_MODEL_NAME_FOR_TEST_HETEROFLOW = "gaunernst/DeepSeek-V2-Lite-Chat-FP8"
+
 # EAGLE
 DEFAULT_EAGLE_TARGET_MODEL_FOR_TEST = "meta-llama/Llama-2-7b-chat-hf"
 DEFAULT_EAGLE_DRAFT_MODEL_FOR_TEST = "lmsys/sglang-EAGLE-llama2-chat-7B"
