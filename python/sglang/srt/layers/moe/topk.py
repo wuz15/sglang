@@ -49,6 +49,10 @@ if _is_cuda:
 if _is_cuda or _is_hip:
     from sgl_kernel import topk_softmax
 
+import os
+enable_esimd_opt = bool(int(os.getenv("ENABLE_ESIMD_TOPK_OPT", "0")))
+if enable_esimd_opt:
+    from sgl_kernel_esimd import esimd_kernel_uni
 
 def fused_topk_native(
     hidden_states: torch.Tensor,
@@ -236,10 +240,27 @@ def biased_grouped_topk_impl(
 ):
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
 
+    if enable_esimd_opt:
+        num_token = gating_output.shape[0]
+        topk_weights_fused = torch.empty(gating_output.shape[0], topk, device=gating_output.device, dtype=torch.float32)
+        topk_ids_fused = torch.empty(gating_output.shape[0], topk, device=gating_output.device, dtype=torch.int32)
+
+        renormalize_weight = 0
+        if renormalize:
+            renormalize_weight = 1
+        esimd_kernel_uni(
+            gating_output, correction_bias, topk_weights_fused, topk_ids_fused, topk_ids_fused, topk_ids_fused, topk_ids_fused, topk_ids_fused, topk_ids_fused, topk_ids_fused,
+            1110, topk, topk_group, num_expert_group, num_token, renormalize_weight, 
+            0, 0, 0, 0,
+            routed_scaling_factor, 1.0, 1.0, 1.0, 1.0)
+
+        return topk_weights_fused, topk_ids_fused
+
     scores = gating_output.sigmoid()
     num_token = scores.shape[0]
     num_experts = scores.shape[1]
     scores_for_choice = scores.view(num_token, -1) + correction_bias.unsqueeze(0)
+
     group_scores = (
         scores_for_choice.view(num_token, num_expert_group, -1)
         .topk(2, dim=-1)[0]
@@ -248,6 +269,7 @@ def biased_grouped_topk_impl(
     group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[
         1
     ]  # [n, top_k_group]
+
     group_mask = torch.zeros_like(group_scores)  # [n, n_group]
     group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
     score_mask = (
@@ -282,6 +304,7 @@ def biased_grouped_topk_impl(
     topk_weights, topk_ids = topk_weights.to(torch.float32), topk_ids.to(torch.int32)
     topk_ids = topk_ids_logical_to_physical(topk_ids, expert_location_dispatch_info)
     _mask_topk_ids_padded_region(topk_ids, num_token_non_padded)
+
     return topk_weights, topk_ids
 
 
@@ -342,13 +365,7 @@ def biased_grouped_topk(
         )(topk_ids, num_token_non_padded)
         return topk_weights, topk_ids
     else:
-        biased_grouped_topk_fn = (
-            torch.compile(
-                biased_grouped_topk_impl, dynamic=True, backend=get_compiler_backend()
-            )
-            if compiled
-            else biased_grouped_topk_impl
-        )
+        biased_grouped_topk_fn = biased_grouped_topk_impl
         return biased_grouped_topk_fn(
             hidden_states,
             gating_output,

@@ -435,6 +435,241 @@ void esimd_residual_kernel_rms_norm_kq(
 }
 }
 
+// gating_output: torch.Tensor,
+//     correction_bias: torch.Tensor,
+//     topk: int,
+//     renormalize: bool,
+//     num_expert_group: int = 0,
+//     topk_group: int = 0,
+//     num_fused_shared_experts: int = 0,
+//     routed_scaling_factor: Optional[float] = None,
+//     num_token_non_padded: Optional[torch.Tensor] = None,
+//     expert_location_dispatch_info: Optional[ExpertLocationDispatchInfo] = None,
+
+void esimd_grouped_topk(
+  uint8_t* gating_output, uint8_t* correction_bias, uint8_t* topk_weights, uint8_t* topk_ids,
+  uint8_t* debug_buffer, uint8_t* debug_buffer_2,
+  int64_t topk_in,
+  int64_t topk_group_in,
+  int64_t num_expert_group_in,
+  int64_t input_len,
+  int64_t renormalize,
+  float routed_scaling_factor,
+
+  sycl::queue& dpcpp_queue)
+{
+  if (!(topk_in == 8 && topk_group_in == 4 && num_expert_group_in == 8))
+  {
+    std::cout << "[esimd_grouped_topk] Not supported topk topk_group num_expert_group " 
+      << topk_in << " " <<  topk_group_in << " " << num_expert_group_in << " " << std::endl;
+    return;
+  }
+
+  // routed_scaling_factor is not used yet
+
+  constexpr uint32_t topk = 8;
+  constexpr uint32_t topk_group = 4;
+  constexpr uint32_t num_expert_group = 8;
+  // assume experts is 256, so each group is 32
+
+  sycl::range<2> GlobalRange(1, input_len*num_expert_group);
+  sycl::range<2> LocalRange(1, num_expert_group);
+  sycl::nd_range<2> Range(GlobalRange, LocalRange);
+
+  dpcpp_queue.submit([&](handler& cgh) {
+    cgh.parallel_for(
+      Range, [=](nd_item<2> ndi) SYCL_ESIMD_KERNEL {
+
+        // (8, 8) top8 for each group for choice   (8, 8) top8 idx for each group  
+        // 8 score for top2 for each group 
+        // (8, 8) top8 for each group real
+        __ESIMD_NS::slm_init(topk * num_expert_group * sizeof(fp16) +
+         topk * num_expert_group * sizeof(int16_t) +
+        num_expert_group * sizeof(fp16) +
+        topk * num_expert_group * sizeof(fp16));
+        
+        constexpr uint32_t top8_idx_for_each_group_offset = num_expert_group*8*sizeof(fp16);
+        constexpr uint32_t groupscore_offset = top8_idx_for_each_group_offset + num_expert_group*8*sizeof(int16_t);
+        constexpr uint32_t realscore_offset = groupscore_offset + num_expert_group * sizeof(fp16);
+
+        int h = ndi.get_group(1);
+        int cnt = ndi.get_local_id(1);
+
+        simd<fp16, 32> input;
+        simd<fp16, 32> input_forchoice;
+        simd<fp16, 32> bias;
+        simd<float, 32> input32;
+        simd<fp16, 8> topkdata;
+        simd<fp16, 8> topkdata_for_choice;
+        topkdata = -INFINITY;
+        topkdata_for_choice = -INFINITY;
+        simd<int16_t, 8> max_k_idx;
+        max_k_idx = -1;
+
+        input.template bit_cast_view<uint8_t>().template select<64, 1>(0) =
+        __ESIMD_ENS::lsc_block_load<
+        uint8_t,
+        64,
+        __ESIMD_ENS::lsc_data_size::default_size,
+        __ESIMD_ENS::cache_hint::cached,
+        __ESIMD_ENS::cache_hint::cached>((uint8_t*)gating_output + h * 32 * num_expert_group * sizeof(fp16) + cnt * 32 * sizeof(fp16));
+
+        bias.template bit_cast_view<uint8_t>().template select<64, 1>(0) =
+        __ESIMD_ENS::lsc_block_load<
+        uint8_t,
+        64,
+        __ESIMD_ENS::lsc_data_size::default_size,
+        __ESIMD_ENS::cache_hint::cached,
+        __ESIMD_ENS::cache_hint::cached>((uint8_t*)correction_bias + cnt * 32 * sizeof(fp16));
+
+
+        // sigmoid
+        input32 = input;
+        input32.select<32, 1>(0) = pow<float, 32, float>(2.718f, (-1.0) * input32.select<32, 1>(0));
+        input32.select<32, 1>(0) = 1.0 / (1.0 + input32.select<32, 1>(0));
+        input = input32;
+
+        input_forchoice = input + bias;
+
+        // top 8 & top 2 sum in group 32 data
+        #pragma unroll
+        for (int j = 0; j < 8; j++)
+        {
+          #pragma unroll
+          for (int k = 0; k < 32; k++)
+          {
+            if (topkdata_for_choice[j] < input_forchoice[k])
+            {
+              topkdata[j] = input[k]; // note, save the data, not for choice.
+              topkdata_for_choice[j] = input_forchoice[k];
+              max_k_idx[j] = k;
+            }
+          }
+          if (max_k_idx[j] >= 0)
+          {
+            input_forchoice[max_k_idx[j]] = -INFINITY;
+          }
+        }
+        max_k_idx += cnt*32;
+        
+        slm_block_store<fp16, 8>(cnt*8*sizeof(fp16), topkdata_for_choice);
+        slm_block_store<int16_t, 8>(top8_idx_for_each_group_offset + cnt*8*sizeof(int16_t), max_k_idx);
+        slm_block_store<fp16, 1>(groupscore_offset + cnt * sizeof(fp16), topkdata_for_choice[0] + topkdata_for_choice[1]);
+        slm_block_store<fp16, 8>(realscore_offset + cnt*8*sizeof(fp16), topkdata);
+
+        barrier(); // -----------------------------------------------
+
+        if (cnt == 0)
+        {
+          topkdata = -INFINITY;
+          simd<fp16, 8> group_score;
+          group_score = slm_block_load<fp16, 8>(groupscore_offset);
+          simd<fp16, 8*4> selected_group_data;
+          simd<fp16, 8*4> selected_group_data_real;
+          simd<fp16, 8*4> selected_group_idx;
+
+          // __ESIMD_ENS::lsc_block_store<
+          //   fp16,
+          //   8,
+          //   __ESIMD_ENS::lsc_data_size::default_size,
+          //   __ESIMD_ENS::cache_hint::write_back,
+          //   __ESIMD_ENS::cache_hint::write_back>((fp16*)debug_buffer + h * 8, group_score);
+          // simd<fp16, 4> group_idx;
+
+          // topk_group is 4
+          // num_expert_group is 8
+
+          int cur_sel_idx = 0;
+
+          // select top 4 group and get data and index of those 4 groups (top8)
+          #pragma unroll
+          for (int j = 0; j < 4; j++)
+          {
+            #pragma unroll
+            for (int k = 0; k < 8; k++)
+            {
+              if (topkdata[j] < group_score[k])
+              {
+                topkdata[j] = group_score[k];
+                cur_sel_idx = k;
+                // group_idx[j] = k;
+              }
+            }
+            if (cur_sel_idx >= 0)
+            {
+              // select cur_sel_idx th group and set to j th GRF.
+              selected_group_data.select<8, 1>(j*8) = slm_block_load<fp16, 8>(cur_sel_idx*8*sizeof(fp16));
+              selected_group_data_real.select<8, 1>(j*8) = slm_block_load<fp16, 8>(realscore_offset + cur_sel_idx*8*sizeof(fp16));
+              selected_group_idx.select<8, 1>(j*8) = slm_block_load<int16_t, 8>(top8_idx_for_each_group_offset + cur_sel_idx*8*sizeof(int16_t));
+              group_score[cur_sel_idx] = -INFINITY;
+            }
+          }
+
+          // __ESIMD_ENS::lsc_block_store<
+          //   int32_t,
+          //   4,
+          //   __ESIMD_ENS::lsc_data_size::default_size,
+          //   __ESIMD_ENS::cache_hint::write_back,
+          //   __ESIMD_ENS::cache_hint::write_back>((int32_t*)debug_buffer_2 + h * 4, group_idx);
+
+          max_k_idx = 0; // avoid the issue
+          topkdata_for_choice = -INFINITY;
+          topkdata = -INFINITY;
+
+          // finally find top8
+          #pragma unroll
+          for (int j = 0; j < 8; j++)
+          {
+            #pragma unroll
+            for (int k = 0; k < 4*8; k++)
+            {
+              if (topkdata_for_choice[j] < selected_group_data[k])
+              {
+                topkdata_for_choice[j] = selected_group_data[k];
+                topkdata[j] = selected_group_data_real[k];  // get from real data, but sort by for choice data
+                max_k_idx[j] = selected_group_idx[k];
+                cur_sel_idx = k;
+              }
+            }
+            if (cur_sel_idx >= 0)
+            {
+              selected_group_data[cur_sel_idx] = -INFINITY;
+            }
+          }
+
+          if (renormalize)
+          {
+            simd<fp16, 8> topkdata_tmp;
+            topkdata_tmp = topkdata;
+            topkdata_tmp.select<4, 1>(0) += topkdata_tmp.select<4, 1>(4);
+            topkdata_tmp.select<2, 1>(0) += topkdata_tmp.select<2, 1>(2);
+            topkdata_tmp[0] += topkdata_tmp[1];
+
+            fp16 sumdata = topkdata_tmp[0];
+
+            topkdata = topkdata / sumdata;
+          }
+
+          __ESIMD_ENS::lsc_block_store<
+            float,
+            8,
+            __ESIMD_ENS::lsc_data_size::default_size,
+            __ESIMD_ENS::cache_hint::write_back,
+            __ESIMD_ENS::cache_hint::write_back>((float*)topk_weights + 8 * h, topkdata.select<8, 1>(0));
+          __ESIMD_ENS::lsc_block_store<
+            int32_t,
+            8,
+            __ESIMD_ENS::lsc_data_size::default_size,
+            __ESIMD_ENS::cache_hint::write_back,
+            __ESIMD_ENS::cache_hint::write_back>((int32_t*)topk_ids + 8 * h, max_k_idx.select<8, 1>(0));
+        }
+      
+      });
+  });
+
+
+}
+
 at::Tensor esimd_kernel_uni(
     at::Tensor _p0,
     at::Tensor _p1,
@@ -496,6 +731,9 @@ at::Tensor esimd_kernel_uni(
         break;
         case 1109:   // rms norm w/ residual add
           esimd_residual_kernel_rms_norm_kq(p0, p1, p2, p3, p4, p5, i1, i2, i3, f0, f1, dpcpp_queue);
+        break;
+        case 1110:
+          esimd_grouped_topk(p0, p1, p2, p3, p4, p5, i1, i2, i3, i4, i5, f0, dpcpp_queue);
         break;
         default:
           printf("---------- esimd kernel op not supported, op is %lld ----------\n", i0);
