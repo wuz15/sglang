@@ -53,6 +53,7 @@ ESIMD_INLINE void SDP_xmx_gemm(
     constexpr uint32_t pongSLMoffset = (k_16xQK_DIM_size * KV_BLOCK + v_16xV_DIM_size * KV_BLOCK);
     constexpr uint16_t mask32_const[32] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+    constexpr uint32_t baseOffsetInc16[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
 
     __ESIMD_NS::slm_init(2 * pongSLMoffset);
     int localLinearId = ndi.get_local_id(2);
@@ -72,9 +73,9 @@ ESIMD_INLINE void SDP_xmx_gemm(
         skipQcal = true;
     }
 
-    int invalid_num = 0;
+    int q_invalid_num = 0;
     if (q_idx_8aligned + 8 > extend_seq_len && q_idx_8aligned < extend_seq_len) {
-        invalid_num = q_idx_8aligned + 8 - extend_seq_len;
+        q_invalid_num = q_idx_8aligned + 8 - extend_seq_len;
     }
 
 
@@ -88,16 +89,16 @@ ESIMD_INLINE void SDP_xmx_gemm(
     int idxVCol = localLinearId_minous_16 / 2;
     bool is_first16 = localLinearId < 16;    //16 threads
 
-    simd<uint32_t, 16> offsetK;
+    simd<uint32_t, 16> offsetK{baseOffsetInc16};
     simd<uint32_t, 16> offsetK_prefill;
     simd<fp16, 16> negative_mask{ -65504.0 };
     simd<uint16_t, 32> mask32(mask32_const);
     auto mask = (mask32 == 1);
 
-#pragma unroll
-    for (int k = 0; k < 16; k++) {
-        offsetK[k] = k;
-    }
+//#pragma unroll
+//    for (int k = 0; k < 16; k++) {
+//        offsetK[k] = k;
+//    }
     // (kv_idx, kv_head, head_dim)  find 16 tokens  which tokens
     offsetK = offsetK * QK_DIM * num_heads_kv * sizeof(fp16) + offsetKbase;
 
@@ -119,27 +120,21 @@ ESIMD_INLINE void SDP_xmx_gemm(
     simd<TYPE_XVE, XMX_OUT_SIZE> softMaxSumTemp = 0.0000000001;
 
     bool read_flag[KV_BLOCK] = { false };
-
+#if 1
+    if (!skipQcal) {
+        if (q_invalid_num == 0) {
 #pragma unroll
-    for (int ll = 0; ll < XMX_M; ll++)
-    {
-        qq_before_shuffle.template select<128, 1>(QK_DIM * ll) =
-            __ESIMD_ENS::lsc_block_load<
-            fp16,
-            128,
-            __ESIMD_ENS::lsc_data_size::default_size,
-            __ESIMD_ENS::cache_hint::uncached,
-            __ESIMD_ENS::cache_hint::uncached>((fp16*)q_extend + offsetQ + ll * num_heads * QK_DIM);
+          for (int ll = 0; ll < XMX_M; ll++) {
+            qq_before_shuffle.select<QK_DIM, 1>(QK_DIM * ll) = block_load<fp16, QK_DIM>((fp16*)q_extend + offsetQ + ll * num_heads * QK_DIM);
+          }
+        } else {
+          for (int ll = 0; ll < XMX_M - q_invalid_num; ll++) {
+            qq_before_shuffle.select<QK_DIM, 1>(QK_DIM * ll) = block_load<fp16, QK_DIM>((fp16*)q_extend + offsetQ + ll * num_heads * QK_DIM);
+          }
 
-        qq_before_shuffle.template select<64, 1>(QK_DIM * ll + 128) =
-            __ESIMD_ENS::lsc_block_load<
-            fp16,
-            64,
-            __ESIMD_ENS::lsc_data_size::default_size,
-            __ESIMD_ENS::cache_hint::uncached,
-            __ESIMD_ENS::cache_hint::uncached>((fp16*)q_extend + offsetQ + ll * num_heads * QK_DIM + 128);
-
+        }
     }
+#endif
 
 #pragma unroll
     for (int ll = 0; ll < XMX_M; ll++) { // 8x192
@@ -443,6 +438,16 @@ ESIMD_INLINE void SDP_xmx_gemm(
                     int offset_is_k_v = 0;
                     if (localLinearId < QK_DIM / XMX_M) // 0 -23 threads
                     {
+                        simd_mask<16> kPred = 1;
+                        if (!kv_is_16aligned)
+                        {
+                            kPred = 0;
+                            int mask = kvSeqLen % 16;
+                            for (int t = 0; t < mask; t++) {
+                                kPred[t] = 1;
+                            }
+                        }
+
                         // 16 x8 , need to read more for 192...
                         kv_read.template bit_cast_view<uint32_t>().template select<64, 1>(0) =
                             __ESIMD_ENS::lsc_gather<
@@ -453,47 +458,60 @@ ESIMD_INLINE void SDP_xmx_gemm(
                             __ESIMD_ENS::cache_hint::cached,
                             16,
                             uint32_t
-                            >((uint32_t*)k_extend, offsetK + kv_idx_16 * 16 * QK_DIM * num_heads_kv/*more tokens*/ * sizeof(fp16));
-
+                            >((uint32_t*)k_extend, offsetK + kv_idx_16 * 16 * QK_DIM * num_heads_kv/*more tokens*/ * sizeof(fp16), kPred);
                         slm_block_store<fp16, 128>(slmOffset + k_16xQK_DIM_size * kvac + 16 * 8 * index_of_16x8_update * sizeof(fp16), kv_read);
                     }
 
                     if (localLinearId >= SDP_THREAD - XMX_K)
                     {
-                        //2D read
-                        kq_out =
-                            __ESIMD_ENS::lsc_load_2d<
-                            fp16, 16, 8, 1,  //8x16
-                            false, false,
-                            __ESIMD_ENS::cache_hint::cached,
-                            __ESIMD_ENS::cache_hint::cached>((fp16*)v_extend + offsetVBase + kv_idx_16 * 16 * vStride /*which 16*/,
-                           16 * sizeof(fp16) - 1, 7, vStride * sizeof(fp16) - 1, 0, 0);
                         bool store_v = true;
 #if 1
-                        if (!kv_is_16aligned) // in case that the valueof V is nan
+                        if (kv_is_16aligned) {
+                            //2D read
+                            kq_out =
+                                __ESIMD_ENS::lsc_load_2d<
+                                fp16, 16, 8, 1,  //8x16
+                                false, false,
+                                __ESIMD_ENS::cache_hint::cached,
+                                __ESIMD_ENS::cache_hint::cached>((fp16*)v_extend + offsetVBase + kv_idx_16 * 16 * vStride /*which 16*/,
+                               16 * sizeof(fp16) - 1, 7, vStride * sizeof(fp16) - 1, 0, 0);
+                        }
+                        else
                         {
-                            int vaild_row = kvSeqLen % 16;
-                            if (vaild_row > 8) {
+                            kq_out = 0;
+                            int valid_row = kvSeqLen % 16;
+                            if (valid_row >= 8) {
                                 if (idxVline == 1)
                                 {
-                                    for (int i = vaild_row; i < 16; i++) {
-                                        kq_out.select<16, 1>(i * 16) = 0;
+                                    for (int i = 0; i < valid_row - 8; i++) {
+                                        kq_out.select<16, 1>(i * 16) = block_load<fp16, 16>((fp16*)v_extend + offsetVBase + kv_idx_16 * 16 * vStride + i * vStride);
                                     }
+                                }
+                                else
+                                {
+                                    kq_out =
+                                        __ESIMD_ENS::lsc_load_2d<
+                                        fp16, 16, 8, 1,  //8x16
+                                        false, false,
+                                        __ESIMD_ENS::cache_hint::cached,
+                                        __ESIMD_ENS::cache_hint::cached>((fp16*)v_extend + offsetVBase + kv_idx_16 * 16 * vStride /*which 16*/,
+                                                16 * sizeof(fp16) - 1, 7, vStride * sizeof(fp16) - 1, 0, 0);
+
                                 }
                             }
                             else {
                                 if (idxVline == 1) {
-                                    store_v = false;
-                                    //for (int i = 0; i < 8; i++) {
-                                    //    kq_out.select<16, 1>(i * 16) = 0;
-                                    //}
+                                    // store_v = false;
                                 }
                                 else {
-                                    for (int i = vaild_row; i < 8; i++) {
-                                        kq_out.select<16, 1>(i * 16) = 0;
+                                    for (int i = 0; i < valid_row; i++) {
+                                        kq_out.select<16, 1>(i * 16) = block_load<fp16, 16>((fp16*)v_extend + offsetVBase + kv_idx_16 * 16 * vStride + i * vStride);
+
                                     }
                                 }
                             }
+
+
                         }
 #endif
 
@@ -530,6 +548,7 @@ ESIMD_INLINE void SDP_xmx_gemm(
 #ifdef DO_PREFETCH_MLA
                     // prefetch
                     int kv_idx_16_next = kv_idx_16 + KV_BLOCK;  //next loopIdx
+                    if(kv_idx_16_next * 16 + 16 <= kvSeqLen)
                     {
                         int offset_is_k_v = 0;
                         if (localLinearId < QK_DIM / XMX_M)
@@ -563,8 +582,8 @@ ESIMD_INLINE void SDP_xmx_gemm(
 #pragma unroll
                     for (int ww = 0; ww < XMX_NUM_QK; ww++) {
 
-                        simd<sycl::half, XMX_OUT_SIZE> bb_xmx{ 0 }; //do not init
-                        simd<sycl::half, XMX_IN_B_SIZE> aa_xmx{ 0 };
+                        simd<sycl::half, XMX_OUT_SIZE> bb_xmx; //do not init
+                        simd<sycl::half, XMX_IN_B_SIZE> aa_xmx;
 
                         bb_xmx = qq.select<XMX_IN_A_SIZE, 1>(ww * XMX_IN_A_SIZE);
                         aa_xmx = kk.select<XMX_IN_B_SIZE, 1>(ww * XMX_IN_B_SIZE);
@@ -614,7 +633,7 @@ ESIMD_INLINE void SDP_xmx_gemm(
                         //uint32_t aligned_mask = 0xffff;
 #pragma unroll
                         for (int i = 0; i < 8; i++) {
-                            softMax.select<16, 1>(i * 16).merge(negative_mask, mask.select<16,1>(16-col));
+                            softMax.select<16, 1>(i * 16).merge(negative_mask, mask.select<16, 1>(16 - col));
                             //softmax.select<8, 1>(i * 16 + col) = -65504.0;
                         }
                     }
@@ -697,18 +716,31 @@ ESIMD_INLINE void SDP_xmx_gemm(
         }
     }
 
-    //shuffle, 8x 8x16  -> 8x128  [or 2D write]
-#pragma unroll
-    for (int ll = 0; ll < 8 - invalid_num; ll++) { //unroll...
-#pragma unroll
-        for (int kk = 0; kk < XMX_NUM_V; kk++) { // 8x16 -> 128
-            output.select<16, 1>(ll * V_DIM + kk * 16) = kvCacheOutFP32.select<16, 1>(kk * V_DIM + ll * 16);
+    if (q_invalid_num == 0) {
+   
+    #pragma unroll
+        for (int ll = 0; ll < XMX_M; ll++) { // unroll...
+    #pragma unroll
+            for (int kk = 0; kk < XMX_NUM_V; kk++) { // 8x16 -> 128
+                output.select<16, 1>(ll * V_DIM + kk * 16) = kvCacheOutFP32.select<16, 1>(kk * V_DIM + ll * 16);
+            }
         }
-    }
 
-#pragma unroll
-    for (int ll = 0; ll < XMX_M - invalid_num; ll++) { // unroll...
-        block_store<fp16, V_DIM>((fp16*)o_extend + outputOffset + ll * num_heads * V_DIM, output.select<V_DIM, 1>(ll * V_DIM));
+    #pragma unroll
+        for (int ll = 0; ll < XMX_M; ll++) { // unroll...
+            block_store<fp16, V_DIM>((fp16*)o_extend + outputOffset + ll * num_heads * V_DIM, output.select<V_DIM, 1>(ll * V_DIM));
+        }
+    } else {
+        for (int ll = 0; ll < XMX_M - q_invalid_num; ll++) { // unroll...
+    #pragma unroll
+            for (int kk = 0; kk < XMX_NUM_V; kk++) { // 8x16 -> 128
+                output.select<16, 1>(ll * V_DIM + kk * 16) = kvCacheOutFP32.select<16, 1>(kk * V_DIM + ll * 16);
+            }
+        }
+
+        for (int ll = 0; ll < XMX_M - q_invalid_num; ll++) { // unroll...
+            block_store<fp16, V_DIM>((fp16*)o_extend + outputOffset + ll * num_heads * V_DIM, output.select<V_DIM, 1>(ll * V_DIM));
+        }
     }
 
 #endif
