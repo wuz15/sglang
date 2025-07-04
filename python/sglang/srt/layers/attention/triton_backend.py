@@ -20,9 +20,11 @@ if TYPE_CHECKING:
     from sglang.srt.speculative.eagle_utils import EagleDraftInput, EagleVerifyInput
 
 import os
+
 enable_esimd_opt = bool(int(os.getenv("ENABLE_ESIMD_MLA_OPT", "0")))
 if enable_esimd_opt:
     from sgl_kernel_esimd import esimd_kernel_uni, esimd_kernel_uni_lgrf
+
 
 @triton.jit
 def get_num_kv_splits_triton(
@@ -738,7 +740,7 @@ class TritonAttnBackend(AttentionBackend):
 
     def get_cuda_graph_seq_len_fill_value(self):
         return 1
-    
+
     def _run_sdpa_forward_extend_esimd(
         self,
         query: torch.Tensor,
@@ -755,16 +757,16 @@ class TritonAttnBackend(AttentionBackend):
         causal=False,
         batch_size=1,
     ):
-        #breakpoint()
+        # breakpoint()
 
         # [num_tokens, num_heads, head_size] -> [num_heads, num_tokens, head_size]
-        #query = query.movedim(0, query.dim() - 2)
+        # query = query.movedim(0, query.dim() - 2)
 
         start_q, start_kv = 0, 0
         for batch_idx in range(batch_size):
 
-            extend_seq_len = extend_seq_lens[batch_idx]     
-            prefix_seq_len = extend_prefix_lens[batch_idx]  
+            extend_seq_len = extend_seq_lens[batch_idx]
+            prefix_seq_len = extend_prefix_lens[batch_idx]
 
             end_q = start_q + extend_seq_len
             end_kv = start_kv + prefix_seq_len
@@ -772,23 +774,44 @@ class TritonAttnBackend(AttentionBackend):
             per_req_query = query[start_q:end_q, :, :]
 
             per_req_tokens = kv_indices[start_kv:end_kv]
-            
+
             per_req_key_ext = k_extend[start_q:end_q]
             per_req_value_ext = v_extend[start_q:end_q]
-            
+
             esimd_out = output[start_q:end_q, :, :]
 
             esimd_kernel_uni_lgrf(
-                per_req_query, per_req_key_ext, per_req_value_ext,k_cache, v_cache, per_req_tokens, esimd_out, esimd_out, esimd_out, esimd_out,
-                1006, query.shape[-2], k_extend.shape[-2], extend_seq_len, prefix_seq_len, k_extend.shape[-1], v_extend.shape[-1], 
-                0, 0, 0,    
-                scaling, 1.0, 1.0, 1.0, 1.0)
-            
+                per_req_query,
+                per_req_key_ext,
+                per_req_value_ext,
+                k_cache,
+                v_cache,
+                per_req_tokens,
+                esimd_out,
+                esimd_out,
+                esimd_out,
+                esimd_out,
+                1006,
+                query.shape[-2],
+                k_extend.shape[-2],
+                extend_seq_len,
+                prefix_seq_len,
+                k_extend.shape[-1],
+                v_extend.shape[-1],
+                0,
+                0,
+                0,
+                scaling,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+            )
+
             output[start_q:end_q, :, :] = esimd_out
-            
+
             start_q, start_kv = end_q, end_kv
         return output
-
 
     def forward_extend(
         self,
@@ -830,14 +853,22 @@ class TritonAttnBackend(AttentionBackend):
             if prefix_len != 0:
                 is_prefill = False
 
-        if enable_esimd_opt and is_prefill:
+        if False and enable_esimd_opt and is_prefill:
             if not self.printed_info_prefill:
-                print("esimd MLA prefill, shapes: q, k, v, o, kv_indptr, kv_indices", 
-                q.shape, forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).shape, forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id).shape,
-                 o.shape, kv_indptr.shape, kv_indices.shape)
+                print(
+                    "esimd MLA prefill, shapes: q, k, v, o, kv_indptr, kv_indices",
+                    q.shape,
+                    forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).shape,
+                    forward_batch.token_to_kv_pool.get_value_buffer(
+                        layer.layer_id
+                    ).shape,
+                    o.shape,
+                    kv_indptr.shape,
+                    kv_indices.shape,
+                )
                 self.printed_info_prefill = True
             B = kv_indptr.shape[0] - 1
-        
+
             Lq = q.view(-1, layer.tp_q_head_num, layer.qk_head_dim).shape[-1]
             sm_scale = layer.scaling or 1.0 / (Lq**0.5)
 
@@ -894,15 +925,45 @@ class TritonAttnBackend(AttentionBackend):
         sm_scale=None,
         batch_size=1,
     ):
-        if not hasattr(self, "sdp_tmp") or self.sdp_tmp.shape != torch.Size([query.shape[-2], 512, v_cache.shape[-1]]):
-            self.sdp_tmp = torch.empty(query.shape[-2], 512, v_cache.shape[-1], dtype=torch.float32, device=query.device) # max to alloc 
+        if not hasattr(self, "sdp_tmp") or self.sdp_tmp.shape != torch.Size(
+            [query.shape[-2], 512, v_cache.shape[-1]]
+        ):
+            self.sdp_tmp = torch.empty(
+                query.shape[-2],
+                512,
+                v_cache.shape[-1],
+                dtype=torch.float32,
+                device=query.device,
+            )  # max to alloc
 
         for batch_idx in range(batch_size):  # B
             esimd_kernel_uni(
-                query, k_cache, v_cache, kv_indptr, kv_indices, self.sdp_tmp, output, output, output, output,
-                1013, query.shape[-2], k_cache.shape[-2], batch_idx,  k_cache.shape[-1], v_cache.shape[-1], 
-                0, 0, 0, 0,    
-                sm_scale, 1.0, 1.0, 1.0, 1.0)
+                query,
+                k_cache,
+                v_cache,
+                kv_indptr,
+                kv_indices,
+                self.sdp_tmp,
+                output,
+                output,
+                output,
+                output,
+                1013,
+                query.shape[-2],
+                k_cache.shape[-2],
+                batch_idx,
+                k_cache.shape[-1],
+                v_cache.shape[-1],
+                0,
+                0,
+                0,
+                0,
+                sm_scale,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+            )
 
         return output
 
@@ -937,13 +998,26 @@ class TritonAttnBackend(AttentionBackend):
             kv_indptr = self.forward_metadata.kv_indptr
             kv_indices = self.forward_metadata.kv_indices
 
-        is_mla_absorb = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).data_ptr() == forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id).data_ptr()
+        is_mla_absorb = (
+            forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).data_ptr()
+            == forward_batch.token_to_kv_pool.get_value_buffer(
+                layer.layer_id
+            ).data_ptr()
+        )
         if enable_esimd_opt and is_mla_absorb:
-            
+
             if not self.printed_info_decode:
-                print("esimd MLA decode, shapes: q, k, v, o, kv_indptr, kv_indices", 
-                q.shape, forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).shape, forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id).shape,
-                 o.shape, kv_indptr.shape, kv_indices.shape)
+                print(
+                    "esimd MLA decode, shapes: q, k, v, o, kv_indptr, kv_indices",
+                    q.shape,
+                    forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).shape,
+                    forward_batch.token_to_kv_pool.get_value_buffer(
+                        layer.layer_id
+                    ).shape,
+                    o.shape,
+                    kv_indptr.shape,
+                    kv_indices.shape,
+                )
                 self.printed_info_decode = True
             B = kv_indptr.shape[0] - 1
 
@@ -959,7 +1033,7 @@ class TritonAttnBackend(AttentionBackend):
                 self.forward_metadata.num_kv_splits,
                 self.max_kv_splits,
                 layer.scaling,
-                B
+                B,
             )
         else:
             # print("mla triton")

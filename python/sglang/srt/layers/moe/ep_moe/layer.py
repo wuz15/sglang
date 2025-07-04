@@ -803,7 +803,7 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
         if isinstance(self.quant_method, Fp8EPMoEMethodCPUInfer):
             # if no need post processing, then delete to speed up.
             if (
-                self.quant_method.quant_config.activation_scheme == "static"
+                self.quant_method.quant_config.activation_scheme != "static"
                 and self.quant_method.quant_config.is_checkpoint_fp8_serialized
             ):
                 del self.quant_method
@@ -829,7 +829,7 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
         self.cpu_result = None
         self.cpu_tensor_tbo_subbatch_id = 0
         self.tensor_tbo_pool_size = 2
-        self.cached_tensors_size = 160  # TODO: magic number
+        self.cached_tensors_size = 8  # TODO: magic number
         self.create_cpu_tensors_if_needed_from_params(
             hidden_size, top_k, torch.bfloat16, self.cached_tensors_size
         )
@@ -961,15 +961,21 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
                     hidden_states, sorted_topk_ids, sorted_topk_weights
                 )
             else:
+                # FIXME: redundant code
                 # these are safe as only decode will run bto heto
                 self.adhoc_cpu_result = torch.zeros_like(
-                    hidden_states, device=self.device, pin_memory=True
+                    hidden_states,
+                    device=self.device,
+                    pin_memory=True,
+                    dtype=torch.bfloat16,
                 )
                 self.adhoc_hidden_states_cpu = hidden_states.to(
-                    self.device, non_blocking=True
+                    self.device,
+                    non_blocking=True,
+                    dtype=torch.bfloat16,
                 )
-                self.adhoc_sorted_topk_ids_cpu = sorted_topk_ids.to(torch.int).to(
-                    self.device, non_blocking=True
+                self.adhoc_sorted_topk_ids_cpu = sorted_topk_ids.to(
+                    self.device, non_blocking=True, dtype=torch.int32
                 )
                 self.adhoc_sorted_topk_weights_cpu = sorted_topk_weights.to(
                     self.device, non_blocking=True
@@ -977,13 +983,16 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
         else:
             self.adhoc_cpu_result = torch.zeros_like(
                 hidden_states,
+                dtype=torch.bfloat16,
                 device=self.device,
             )
             self.adhoc_hidden_states_cpu = hidden_states.to(
-                self.device, non_blocking=True
+                self.device,
+                non_blocking=True,
+                dtype=torch.bfloat16,
             )
-            self.adhoc_sorted_topk_ids_cpu = sorted_topk_ids.to(torch.int).to(
-                self.device, non_blocking=True
+            self.adhoc_sorted_topk_ids_cpu = sorted_topk_ids.to().to(
+                self.device, non_blocking=True, dtype=torch.int32
             )
             self.adhoc_sorted_topk_weights_cpu = sorted_topk_weights.to(
                 self.device, non_blocking=True
@@ -994,6 +1003,7 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
             raise RuntimeError(f"Cpu moe engine is not created.")
 
         n_tokens = hidden_states.shape[0]
+        # FIXME: redundant code
         if hidden_states.device.type == "cuda":
             if (
                 torch.cuda.is_current_stream_capturing()
@@ -1024,15 +1034,27 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
                 return self.adhoc_cpu_result
         elif hidden_states.device.type in ["cpu", "xpu"]:
             torch.get_device_module(hidden_states.device).synchronize()
-            self.cpu_infer.submit(
-                self.cpu_moe_engine.forward_experts(
-                    self.adhoc_hidden_states_cpu.data_ptr(),
-                    self.adhoc_sorted_topk_ids_cpu.data_ptr(),
-                    self.adhoc_sorted_topk_weights_cpu.data_ptr(),
-                    self.adhoc_cpu_result.data_ptr(),
-                    n_tokens,
-                ),
-            )
+            if n_tokens <= self.cached_tensors_size:
+                self.cpu_infer.submit(
+                    self.cpu_moe_engine.forward_experts(
+                        self.cpu_hidden_states.data_ptr(),
+                        self.cpu_sorted_topk_ids.data_ptr(),
+                        self.cpu_sorted_topk_weights.data_ptr(),
+                        self.cpu_result.data_ptr(),
+                        n_tokens,
+                    ),
+                )
+                return self.cpu_result[:n_tokens]
+            else:
+                self.cpu_infer.submit(
+                    self.cpu_moe_engine.forward_experts(
+                        self.adhoc_hidden_states_cpu.data_ptr(),
+                        self.adhoc_sorted_topk_ids_cpu.data_ptr(),
+                        self.adhoc_sorted_topk_weights_cpu.data_ptr(),
+                        self.adhoc_cpu_result.data_ptr(),
+                        n_tokens,
+                    ),
+                )
             return self.adhoc_cpu_result
         else:
             raise ValueError(
@@ -1051,8 +1073,10 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
                 f"Unsupported device: {hidden_states_device}. Only cuda, xpu and cpu are supported now"
             )
 
-    def forward_to_gpu(self, hidden_states_device, cpu_result):
-        return cpu_result.to(hidden_states_device, non_blocking=True)
+    def forward_to_gpu(self, hidden_states_device, hidden_states_dtype, cpu_result):
+        return cpu_result.to(
+            hidden_states_device, hidden_states_dtype, non_blocking=True
+        )
 
     def forward(self):
         raise NotImplementedError("forward Not implemented")
@@ -1294,7 +1318,7 @@ class EPMoEHeto(EPMoESparse):
     ):
         if self.cpu_moe:
             cpu_result_on_gpu = self.cpu_moe.forward_to_gpu(
-                hidden_states_device, cpu_result
+                hidden_states_device, hidden_states_dtype, cpu_result
             )
 
         if gpu_result is None:

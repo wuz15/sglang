@@ -169,20 +169,24 @@ def load_model(server_args, port_args, tp_rank):
 
 def prepare_inputs_for_correctness_test(bench_args, tokenizer, batch_size):
     prompts = [
+        "The capital of France is",
+        "The capital of the United Kindom is",
+        "Today is a sunny day and I like",
+        "Sky is blue because",
         """The Qwen3 Embedding model series is the latest proprietary model of the Qwen family, specifically designed for text embedding and ranking tasks. Building upon the dense foundational models of the Qwen3 series, it provides a comprehensive range of text embeddings and reranking models in various sizes (0.6B, 4B, and 8B). This series inherits the exceptional multilingual capabilities, long-text understanding, and reasoning skills of its foundational model. The Qwen3 Embedding series represents significant advancements in multiple text embedding and ranking tasks, including text retrieval, code retrieval, text classification, text clustering, and bitext mining.
 
 Exceptional Versatility: The embedding model has achieved state-of-the-art performance across a wide range of downstream application evaluations. The 8B size embedding model ranks No.1 in the MTEB multilingual leaderboard (as of June 5, 2025, score 70.58), while the reranking model excels in various text retrieval scenarios.
 
 Comprehensive Flexibility: The Qwen3 Embedding series offers a full spectrum of sizes (from 0.6B to 8B) for both embedding and reranking models, catering to diverse use cases that prioritize efficiency and effectiveness. Developers can seamlessly combine these two modules. Additionally, the embedding model allows for flexible vector definitions across all dimensions, and both embedding and reranking models support user-defined instructions to enhance performance for specific tasks, languages, or scenarios.
 
-Multilingual Capability: The Qwen3 Embedding series offer support for over 100 languages, thanks to the multilingual capabilites of Qwen3 models. This includes various programming languages, and provides robust multilingual, cross-lingual, and code retrieval capabilities.
+Multilingual Capability: The Qwen3 Embedding series offer support for over 100 languages, thanks to the multilingual capabilities of Qwen3 models. This includes various programming languages, and provides robust multilingual, cross-lingual, and code retrieval capabilities.
 
 Model Overview
 Qwen3-Embedding-0.6B has the following features:
 
 Model Type: Text Embedding
 Supported Languages: 100+ Languages
-Number of Paramaters: 0.6B
+Number of Parameters: 0.6B
 Context Length: 32k
 Embedding Dimension: Up to 1024, supports user-defined output dimensions ranging from 32 to 1024
 For more details, including benchmark evaluation, hardware requirements, and inference performance, please refer to our blog, GitHub.
@@ -201,10 +205,6 @@ MRL Support indicates whether the embedding model supports custom dimensions for
 Instruction Aware notes whether the embedding or reranking model supports customizing the input instruction according to different tasks.
 Our evaluation indicates that, for most downstream tasks, using instructions (instruct) typically yields an improvement of 1% to 5% compared to not using them. Therefore, we recommend that developers create tailored instructions specific to their tasks and scenarios. In multilingual contexts, we also advise users to write their instructions in English, as most instructions utilized during the model training process were originally written in English.
 """,
-        "The capital of France is",
-        "The capital of the United Kindom is",
-        "Today is a sunny day and I like",
-        "Sky is blue because",
     ][:batch_size]
     input_ids = [tokenizer.encode(p) for p in prompts]
     sampling_params = SamplingParams(

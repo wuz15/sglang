@@ -180,6 +180,7 @@ class Fp8Config(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
+
 class Fp8LinearMethod(LinearMethodBase):
     """Linear method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
@@ -425,7 +426,15 @@ class Fp8LinearMethod(LinearMethodBase):
     def is_k_contiguous(self, tt):
         return tt.shape[-1] == tt.stride()[-2]
 
-    def fp8_gemm_opt(self, input: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor, block_n=128, block_k=128, bias: torch.Tensor = None):
+    def fp8_gemm_opt(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        block_n=128,
+        block_k=128,
+        bias: torch.Tensor = None,
+    ):
         # if not (self.is_k_contiguous(input) and self.is_k_contiguous(weight) and self.is_k_contiguous(weight_scale)):
         #     print("fp8_gemm_opt shape not supported!")
         #     return None
@@ -447,7 +456,10 @@ class Fp8LinearMethod(LinearMethodBase):
         N = weight.shape[-2]
         K = input.shape[-1]
 
-        if (weight_scale.shape[-1] != (K + block_k - 1) // block_k or weight_scale.shape[-2] != (N + block_n - 1) // block_n):
+        if (
+            weight_scale.shape[-1] != (K + block_k - 1) // block_k
+            or weight_scale.shape[-2] != (N + block_n - 1) // block_n
+        ):
             print("fp8_gemm_opt weight_scale shape incorrect!")
 
         has_bias = 0
@@ -456,14 +468,41 @@ class Fp8LinearMethod(LinearMethodBase):
             has_bias = 1
             bias_in = bias
 
-        if (M > 8):  # GEMM not GEMV
+        if M > 8:  # GEMM not GEMV
             if not self.printed_info_gemm:
                 print("running fp8 esimd GEMM opt kernel: M, N, K", M, " ", N, " ", K)
                 self.printed_info_gemm = True
 
-            dq_weight_fp16 = torch.empty(weight.shape, dtype=torch.float16, device=weight.device)
-            esimd_kernel_uni(weight, weight_scale, dq_weight_fp16, dq_weight_fp16, dq_weight_fp16, dq_weight_fp16, dq_weight_fp16, dq_weight_fp16, dq_weight_fp16, dq_weight_fp16,
-                4999, N, K, block_n, block_k, 1, 1, 1, 1, 1, 1.0, 1.0, 1.0, 1.0, 1.0)
+            dq_weight_fp16 = torch.empty(
+                weight.shape, dtype=torch.float16, device=weight.device
+            )
+            esimd_kernel_uni(
+                weight,
+                weight_scale,
+                dq_weight_fp16,
+                dq_weight_fp16,
+                dq_weight_fp16,
+                dq_weight_fp16,
+                dq_weight_fp16,
+                dq_weight_fp16,
+                dq_weight_fp16,
+                dq_weight_fp16,
+                4999,
+                N,
+                K,
+                block_n,
+                block_k,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+            )
             # dequant and use FP16 GEMM
             if has_bias:
                 output = torch.matmul(input, dq_weight_fp16.transpose(0, 1)) + bias
@@ -472,31 +511,65 @@ class Fp8LinearMethod(LinearMethodBase):
             return output
 
         if not self.printed_info_gemv:
-            print("running fp8 esimd GEMV opt kernel: M, N, K", M, " ", N, " ", K)
+            # print("running fp8 esimd GEMV opt kernel: M, N, K", M, " ", N, " ", K)
             self.printed_info_gemv = True
 
         batch = 1
         if len(input.shape) == 4:
             batch = input.shape[-3]
-            output = torch.empty(input.shape[0], input.shape[1], M, N, device=input.device, dtype=input.dtype)
+            output = torch.empty(
+                input.shape[0],
+                input.shape[1],
+                M,
+                N,
+                device=input.device,
+                dtype=input.dtype,
+            )
         elif len(input.shape) == 3:
             batch = input.shape[-3]
-            output = torch.empty(input.shape[0], M, N, device=input.device, dtype=input.dtype)
+            output = torch.empty(
+                input.shape[0], M, N, device=input.device, dtype=input.dtype
+            )
         elif len(input.shape) == 2:
             output = torch.empty(M, N, device=input.device, dtype=input.dtype)
 
-        esimd_kernel_uni(input, weight, weight_scale, bias_in, output, output, output, output, output, output,
-            5000, M, N, K, batch, block_n, block_k, has_bias, 1, 1, 1.0, 1.0, 1.0, 1.0, 1.0)
+        esimd_kernel_uni(
+            input,
+            weight,
+            weight_scale,
+            bias_in,
+            output,
+            output,
+            output,
+            output,
+            output,
+            output,
+            5000,
+            M,
+            N,
+            K,
+            batch,
+            block_n,
+            block_k,
+            has_bias,
+            1,
+            1,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+        )
 
         return output
-    
+
     def is_fp8_using_opt(self, weight):
         if not self.enable_esimd_fp8_gemm_opt:
             return False
 
         if weight.shape[1] % 256 == 0:
             return True
-            
+
         return False
 
     def apply(
@@ -535,10 +608,10 @@ class Fp8LinearMethod(LinearMethodBase):
                     block_k=self.quant_config.weight_block_size[0],
                     block_n=self.quant_config.weight_block_size[1],
                     weight_scale=layer.weight_scale_inv,
-                    bias=bias
-                    )
+                    bias=bias,
+                )
                 return out
-            out_ref =  self.w8a8_block_fp8_linear(
+            out_ref = self.w8a8_block_fp8_linear(
                 input=x,
                 weight=layer.weight,
                 block_size=self.quant_config.weight_block_size,
