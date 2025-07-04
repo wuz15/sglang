@@ -945,20 +945,39 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
             topk_weights, topk_ids
         )
         n_tokens = hidden_states.shape[0]
-        if (
-            torch.cuda.is_current_stream_capturing()
-            or n_tokens <= self.cached_tensors_size
-        ):
-            assert n_tokens <= self.cached_tensors_size
-            # we are switching to next set, so prepare and enqueue must be together
-            # there cannot be other prepare or enqueue in between
-            # please make sure check operation strategies won't break this assumption
-            self._switch_to_next_tensor_set()
-            self.fill_cpu_tensors(hidden_states, sorted_topk_ids, sorted_topk_weights)
+        if hidden_states.device.type in ["xpu", "cuda"]:
+            if (
+                hidden_states.device.type == "cuda"
+                and torch.cuda.is_current_stream_capturing()
+                or n_tokens <= self.cached_tensors_size
+            ):
+                if hidden_states.device.type == "cuda":
+                    assert n_tokens <= self.cached_tensors_size
+                # we are switching to next set, so prepare and enqueue must be together
+                # there cannot be other prepare or enqueue in between
+                # please make sure check operation strategies won't break this assumption
+                self._switch_to_next_tensor_set()
+                self.fill_cpu_tensors(
+                    hidden_states, sorted_topk_ids, sorted_topk_weights
+                )
+            else:
+                # these are safe as only decode will run bto heto
+                self.adhoc_cpu_result = torch.zeros_like(
+                    hidden_states, device=self.device, pin_memory=True
+                )
+                self.adhoc_hidden_states_cpu = hidden_states.to(
+                    self.device, non_blocking=True
+                )
+                self.adhoc_sorted_topk_ids_cpu = sorted_topk_ids.to(torch.int).to(
+                    self.device, non_blocking=True
+                )
+                self.adhoc_sorted_topk_weights_cpu = sorted_topk_weights.to(
+                    self.device, non_blocking=True
+                )
         else:
-            # these are safe as only decode will run bto heto
             self.adhoc_cpu_result = torch.zeros_like(
-                hidden_states, device=self.device, pin_memory=True
+                hidden_states,
+                device=self.device,
             )
             self.adhoc_hidden_states_cpu = hidden_states.to(
                 self.device, non_blocking=True
@@ -972,28 +991,40 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
 
     def forward_enqueue(self, hidden_states: torch.Tensor):
         if self.cpu_moe_engine is None:
-            torch.cuda.current_stream().synchronize()
-            self._create_cpu_moe_engine()
+            raise RuntimeError(f"Cpu moe engine is not created.")
 
         n_tokens = hidden_states.shape[0]
-        if (
-            torch.cuda.is_current_stream_capturing()
-            or n_tokens <= self.cached_tensors_size
-        ):
-            self.cpu_infer.submit_with_cuda_stream(
-                torch.cuda.current_stream(hidden_states.device).cuda_stream,
-                self.cpu_moe_engine.forward_experts(
-                    self.cpu_hidden_states.data_ptr(),
-                    self.cpu_sorted_topk_ids.data_ptr(),
-                    self.cpu_sorted_topk_weights.data_ptr(),
-                    self.cpu_result.data_ptr(),
-                    n_tokens,
-                ),
-            )
-            return self.cpu_result[:n_tokens]
-        else:
-            self.cpu_infer.submit_with_cuda_stream(
-                torch.cuda.current_stream(hidden_states.device).cuda_stream,
+        if hidden_states.device.type == "cuda":
+            if (
+                torch.cuda.is_current_stream_capturing()
+                or n_tokens <= self.cached_tensors_size
+            ):
+                self.cpu_infer.submit_with_cuda_stream(
+                    torch.cuda.current_stream(hidden_states.device).cuda_stream,
+                    self.cpu_moe_engine.forward_experts(
+                        self.cpu_hidden_states.data_ptr(),
+                        self.cpu_sorted_topk_ids.data_ptr(),
+                        self.cpu_sorted_topk_weights.data_ptr(),
+                        self.cpu_result.data_ptr(),
+                        n_tokens,
+                    ),
+                )
+                return self.cpu_result[:n_tokens]
+            else:
+                self.cpu_infer.submit_with_cuda_stream(
+                    torch.cuda.current_stream(hidden_states.device).cuda_stream,
+                    self.cpu_moe_engine.forward_experts(
+                        self.adhoc_hidden_states_cpu.data_ptr(),
+                        self.adhoc_sorted_topk_ids_cpu.data_ptr(),
+                        self.adhoc_sorted_topk_weights_cpu.data_ptr(),
+                        self.adhoc_cpu_result.data_ptr(),
+                        n_tokens,
+                    ),
+                )
+                return self.adhoc_cpu_result
+        elif hidden_states.device.type in ["cpu", "xpu"]:
+            torch.get_device_module(hidden_states.device).synchronize()
+            self.cpu_infer.submit(
                 self.cpu_moe_engine.forward_experts(
                     self.adhoc_hidden_states_cpu.data_ptr(),
                     self.adhoc_sorted_topk_ids_cpu.data_ptr(),
@@ -1003,11 +1034,22 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
                 ),
             )
             return self.adhoc_cpu_result
+        else:
+            raise ValueError(
+                f"Unsupported device: {hidden_states.device}. Only cuda, xpu and cpu are supported now"
+            )
 
     def forward_sync(self, hidden_states_device):
-        self.cpu_infer.sync_with_cuda_stream(
-            torch.cuda.current_stream(hidden_states_device).cuda_stream
-        )
+        if hidden_states_device.type == "cuda":
+            self.cpu_infer.sync_with_cuda_stream(
+                torch.cuda.current_stream(hidden_states_device).cuda_stream
+            )
+        elif hidden_states_device.type in ["xpu", "cpu"]:
+            self.cpu_infer.sync()
+        else:
+            raise ValueError(
+                f"Unsupported device: {hidden_states_device}. Only cuda, xpu and cpu are supported now"
+            )
 
     def forward_to_gpu(self, hidden_states_device, cpu_result):
         return cpu_result.to(hidden_states_device, non_blocking=True)
@@ -1018,13 +1060,19 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
     def create_cpu_tensors_if_needed_from_params(
         self, hidden_size, topk, dtype, batchsize
     ):
+
         if self.cpu_hidden_states is None:
+            try:
+                torch.empty((16, 16), dtype=dtype, device=self.device, pin_memory=True)
+                pin_memory = True
+            except RuntimeError as e:
+                pin_memory = False
             self.cpu_hidden_states_pool = [
                 torch.empty(
                     (batchsize, hidden_size),
                     dtype=dtype,
                     device=self.device,
-                    pin_memory=True,
+                    pin_memory=pin_memory,
                 )
                 for _ in range(self.tensor_tbo_pool_size)
             ]
@@ -1033,7 +1081,7 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
                     (batchsize, topk),
                     dtype=torch.int32,
                     device=self.device,
-                    pin_memory=True,
+                    pin_memory=pin_memory,
                 )
                 for _ in range(self.tensor_tbo_pool_size)
             ]
@@ -1042,7 +1090,7 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
                     (batchsize, topk),
                     dtype=torch.float32,
                     device=self.device,
-                    pin_memory=True,
+                    pin_memory=pin_memory,
                 )
                 for _ in range(self.tensor_tbo_pool_size)
             ]
@@ -1051,7 +1099,7 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
                     (batchsize, hidden_size),
                     dtype=dtype,
                     device=self.device,
-                    pin_memory=True,
+                    pin_memory=pin_memory,
                 )
                 for _ in range(self.tensor_tbo_pool_size)
             ]
@@ -1141,6 +1189,7 @@ class EPMoEHeto(EPMoESparse):
             use_per_token_if_dynamic,
             expert_map,
         )
+
         if self.is_hosting_cpu():
             self.cpu_moe = EPMoESparseCPUInfer(
                 num_experts,
@@ -1184,6 +1233,7 @@ class EPMoEHeto(EPMoESparse):
         hidden_states_dtype = hidden_states.dtype
         self.forward_routed_experts_prepare(hidden_states, router_logits)
         cpu_result = self.forward_routed_experts_enqueue(hidden_states, router_logits)
+        shared_output = None
         if op_shared_experts is not None:
             shared_output = op_shared_experts(hidden_states)
         gpu_result = self.forward_routed_experts_maybe_gpu(
