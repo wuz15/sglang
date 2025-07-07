@@ -50,6 +50,12 @@ logger = logging.getLogger(__name__)
 GB = 1024 * 1024 * 1024
 _is_cuda = is_cuda()
 
+import os
+
+enable_esimd_opt = bool(int(os.getenv("ENABLE_ESIMD_NORM_ROPE_OPT", "0")))
+if enable_esimd_opt:
+    from sgl_kernel_esimd import esimd_kernel_uni
+
 
 class ReqToTokenPool:
     """A memory pool that maps a request to its token locations."""
@@ -600,6 +606,36 @@ class MLATokenToKVPool(KVCache):
         cache_v: torch.Tensor,
     ):
         layer_id = layer.layer_id
+        if enable_esimd_opt:
+            esimd_kernel_uni(
+                self.kv_buffer[layer_id - self.start_layer],
+                loc,
+                cache_k,
+                cache_k,
+                cache_k,
+                cache_k,
+                cache_k,
+                cache_k,
+                cache_k,
+                cache_k,
+                1112,
+                cache_k.shape[-1],
+                loc.shape[0],
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+            )
+            return
+
         if cache_k.dtype != self.dtype:
             cache_k = cache_k.to(self.dtype)
         if self.store_dtype != self.dtype:

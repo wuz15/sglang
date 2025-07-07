@@ -998,12 +998,7 @@ class TritonAttnBackend(AttentionBackend):
             kv_indptr = self.forward_metadata.kv_indptr
             kv_indices = self.forward_metadata.kv_indices
 
-        is_mla_absorb = (
-            forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).data_ptr()
-            == forward_batch.token_to_kv_pool.get_value_buffer(
-                layer.layer_id
-            ).data_ptr()
-        )
+        is_mla_absorb = True
         if enable_esimd_opt and is_mla_absorb:
 
             if not self.printed_info_decode:

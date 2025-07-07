@@ -14,9 +14,10 @@
 #include "esimd_kernels/fp8_GEMV.h"
 #include "esimd_kernels/sdpa_norm.h"
 #include "esimd_kernels/rmsNorm.h"
+#include "esimd_kernels/rotary_pos_emb.h"
 
 void esimd_add(uint8_t* a, uint8_t* b, uint8_t* c, int64_t len, sycl::queue& q){
-    sycl::range<1> LocalRange(16); 
+    sycl::range<1> LocalRange(16);
     sycl::range<1> GlobalRange(len / 128);
 
     sycl::nd_range<1> Range(GlobalRange, LocalRange);
@@ -69,7 +70,7 @@ at::Tensor esimd_add(
 
 void GEMV_a16_wfp8_block_host(
   uint8_t* input_data,
-  uint8_t* weight_data, 
+  uint8_t* weight_data,
   uint8_t* weight_scale_data,
   uint8_t* bias_data,
   uint8_t* output_data,
@@ -179,20 +180,20 @@ void GEMV_a16_wfp8_block_host(
       }
       else
       {
-        std::cout << "[GEMV_a16_wfp8_block] Not supported M N K batch scaleNxK " 
+        std::cout << "[GEMV_a16_wfp8_block] Not supported M N K batch scaleNxK "
         << M << " " <<  N << " " << K << " " << batch << " " << scale_block_size_K << "x" << scale_block_size_N << " " << std::endl;
       }
     }
     else
     {
-      std::cout << "[GEMV_a16_wfp8_block] Not supported M N K batch scaleNxK " 
+      std::cout << "[GEMV_a16_wfp8_block] Not supported M N K batch scaleNxK "
         << M << " " <<  N << " " << K << " " << batch << " " << scale_block_size_K << "x" << scale_block_size_N << " " << std::endl;
     }
 
   }
 
 void wfp8_dequant_host(
-  uint8_t* weight_data, 
+  uint8_t* weight_data,
   uint8_t* weight_scale_data,
   uint8_t* output_data,
   uint32_t N,
@@ -234,7 +235,7 @@ void wfp8_dequant_host(
         {
           GEMV_a16_wfp8_block<fp16, 8, 512, 2, fp16, 128, 128, true, 1>(GEMV_A16_WFP8_BLK_PARAMS);
         }
-      } 
+      }
       else // K % 256 == 0
       {
         GEMV_a16_wfp8_block<fp16, 8, 256, 2, fp16, 128, 128, true, 1>(GEMV_A16_WFP8_BLK_PARAMS);
@@ -242,7 +243,7 @@ void wfp8_dequant_host(
     }
     else
     {
-      std::cout << "[wfp8_dequant] Not supported N K scaleNxK " 
+      std::cout << "[wfp8_dequant] Not supported N K scaleNxK "
         <<  N << " " << K << " " << scale_block_size_K << "x" << scale_block_size_N << " " << std::endl;
     }
 
@@ -262,7 +263,7 @@ void wfp8_dequant_host(
 
 void BMM_GEMV_a16_wfp8_block_host(
   uint8_t* input_data,
-  uint8_t* weight_data, 
+  uint8_t* weight_data,
   uint8_t* output_data,
   uint32_t M,
   uint32_t N,
@@ -320,7 +321,7 @@ void BMM_GEMV_a16_wfp8_block_host(
     }
     else
     {
-      std::cout << "[BMM_GEMV_a16_wfp8_block] Not supported M N K batch " 
+      std::cout << "[BMM_GEMV_a16_wfp8_block] Not supported M N K batch "
       << M << " " <<  N << " " << K << " " << batch << " " << std::endl;
     }
   }
@@ -331,7 +332,7 @@ void esimd_sdpa_normal_with_reduce(
     uint8_t* query,
     uint8_t* key,
     uint8_t* value,
-    uint8_t* kv_indptr, 
+    uint8_t* kv_indptr,
     uint8_t* kv_indices,
     uint8_t* sdp_tmp,
     uint8_t* attn_mask,
@@ -460,7 +461,7 @@ void esimd_grouped_topk(
 {
   if (!(topk_in == 8 && topk_group_in == 4 && num_expert_group_in == 8))
   {
-    std::cout << "[esimd_grouped_topk] Not supported topk topk_group num_expert_group " 
+    std::cout << "[esimd_grouped_topk] Not supported topk topk_group num_expert_group "
       << topk_in << " " <<  topk_group_in << " " << num_expert_group_in << " " << std::endl;
     return;
   }
@@ -480,14 +481,14 @@ void esimd_grouped_topk(
     cgh.parallel_for(
       Range, [=](nd_item<2> ndi) SYCL_ESIMD_KERNEL {
 
-        // (8, 8) top8 for each group for choice   (8, 8) top8 idx for each group  
-        // 8 score for top2 for each group 
+        // (8, 8) top8 for each group for choice   (8, 8) top8 idx for each group
+        // 8 score for top2 for each group
         // (8, 8) top8 for each group real
         __ESIMD_NS::slm_init(topk * num_expert_group * sizeof(fp16) +
          topk * num_expert_group * sizeof(int16_t) +
         num_expert_group * sizeof(fp16) +
         topk * num_expert_group * sizeof(fp16));
-        
+
         constexpr uint32_t top8_idx_for_each_group_offset = num_expert_group*8*sizeof(fp16);
         constexpr uint32_t groupscore_offset = top8_idx_for_each_group_offset + num_expert_group*8*sizeof(int16_t);
         constexpr uint32_t realscore_offset = groupscore_offset + num_expert_group * sizeof(fp16);
@@ -551,7 +552,7 @@ void esimd_grouped_topk(
           }
         }
         max_k_idx += cnt*32;
-        
+
         slm_block_store<fp16, 8>(cnt*8*sizeof(fp16), topkdata_for_choice);
         slm_block_store<int16_t, 8>(top8_idx_for_each_group_offset + cnt*8*sizeof(int16_t), max_k_idx);
         slm_block_store<fp16, 1>(groupscore_offset + cnt * sizeof(fp16), topkdata_for_choice[0] + topkdata_for_choice[1]);
@@ -663,7 +664,107 @@ void esimd_grouped_topk(
             __ESIMD_ENS::cache_hint::write_back,
             __ESIMD_ENS::cache_hint::write_back>((int32_t*)topk_ids + 8 * h, max_k_idx.select<8, 1>(0));
         }
-      
+
+      });
+  });
+
+
+}
+
+void esimd_rotary_pos_emb_ds(uint8_t* qState, uint8_t* kState, uint8_t* cos_sin_cache, uint8_t* positions, uint8_t* offsets,
+ int num_heads_q, int hidden_dim_q, int hd_stride_q,
+ int num_heads_kv, int hidden_dim_kv, int hd_stride_kv, int head_hd_stride_kv, int input_len, int has_offset, sycl::queue& dpcpp_queue) {
+
+  // printf("input_len = %d", (int)input_len);
+  sycl::range<2> GlobalRange(input_len, num_heads_q + num_heads_kv);
+  sycl::range<2> LocalRange(1, 1);
+  sycl::nd_range<2> Range(GlobalRange, LocalRange);
+  static int callCount = 0;
+  // printf("---------- esimd_rotary_pos_emb, GlobalRange: %d, %d ----------\n", num_heads_q + num_heads_kv, 1 );
+  // currently only support hidden_dim_q and hidden_dim_kv 64
+
+  sycl::event e;
+  try {
+    e = dpcpp_queue.submit([&](handler& cgh) {
+        cgh.parallel_for(Range, [=](nd_item<2> ndi) SYCL_ESIMD_KERNEL{
+          rotary_pos_emb_ds(qState, kState, cos_sin_cache, positions, offsets,
+            num_heads_q, hidden_dim_q, hd_stride_q, num_heads_kv, hidden_dim_kv, hd_stride_kv, head_hd_stride_kv, has_offset, ndi);
+      });
+    });
+  } catch (sycl::exception const &e) {
+    std::cout << "SYCL exception caught: " << e.what() << '\n';
+    return;
+  }
+
+}
+
+
+ void esimd_updateKV_indexed(
+  uint8_t* kv_cache, uint8_t* loc, uint8_t* kv_input,
+  int64_t kv_hd,
+  int64_t update_len,
+
+  sycl::queue& dpcpp_queue)
+{
+  // only support one kv head for MLA
+
+  // int n_threads = (kv_hd + 127) / 128;
+  // int hd_last_thread = kv_hd % 128;
+  // if (hd_last_thread == 0) hd_last_thread = 128;
+
+  constexpr int n_threads = 5;
+  constexpr int hd_last_thread = 64;
+
+  sycl::range<1> GlobalRange(update_len*n_threads);
+  sycl::range<1> LocalRange(n_threads);
+  sycl::nd_range<1> Range(GlobalRange, LocalRange);
+
+  dpcpp_queue.submit([&](handler& cgh) {
+    cgh.parallel_for(
+      Range, [=](nd_item<1> ndi) SYCL_ESIMD_KERNEL {
+
+        int h = ndi.get_group(0);
+        int hh = ndi.get_local_id(0);
+
+        uint64_t outh = ((uint64_t*)loc)[h];
+
+        simd<fp16, 128> input;
+
+        if (hh != (n_threads-1))
+        {
+          input.template bit_cast_view<uint8_t>().template select<256, 1>(0) =
+            __ESIMD_ENS::lsc_block_load<
+            uint8_t,
+            256,
+            __ESIMD_ENS::lsc_data_size::default_size,
+            __ESIMD_ENS::cache_hint::cached,
+            __ESIMD_ENS::cache_hint::cached>((uint8_t*)kv_input + (h * kv_hd + hh * 128) * sizeof(fp16));
+
+          __ESIMD_ENS::lsc_block_store<
+            fp16,
+            128,
+            __ESIMD_ENS::lsc_data_size::default_size,
+            __ESIMD_ENS::cache_hint::write_back,
+            __ESIMD_ENS::cache_hint::write_back>((fp16*)kv_cache + outh * kv_hd + hh * 128, input.select<128, 1>(0));
+        }
+        else
+        {
+          input.template bit_cast_view<uint8_t>().template select<128, 1>(0) =
+            __ESIMD_ENS::lsc_block_load<
+            uint8_t,
+            128,
+            __ESIMD_ENS::lsc_data_size::default_size,
+            __ESIMD_ENS::cache_hint::cached,
+            __ESIMD_ENS::cache_hint::cached>((uint8_t*)kv_input + (h * kv_hd + hh * 128) * sizeof(fp16));
+
+          __ESIMD_ENS::lsc_block_store<
+            fp16,
+            64,
+            __ESIMD_ENS::lsc_data_size::default_size,
+            __ESIMD_ENS::cache_hint::write_back,
+            __ESIMD_ENS::cache_hint::write_back>((fp16*)kv_cache + outh * kv_hd + hh * 128, input.select<64, 1>(0));
+        }
+
       });
   });
 
@@ -723,7 +824,7 @@ at::Tensor esimd_kernel_uni(
         case 5001:
           BMM_GEMV_a16_wfp8_block_host(p0, p1, p2, i1, i2, i3, i4, i5, f0, dpcpp_queue);
         break;
-        case 1013: 
+        case 1013:
           esimd_sdpa_normal_with_reduce(p0, p1, p2, p3, p4, p5, p6, p7, i1, i2, i3, i4, i5, f0, f1, dpcpp_queue);
         break;
         case 1108:   // rms norm w/ residual add
@@ -734,6 +835,12 @@ at::Tensor esimd_kernel_uni(
         break;
         case 1110:
           esimd_grouped_topk(p0, p1, p2, p3, p4, p5, i1, i2, i3, i4, i5, f0, dpcpp_queue);
+        break;
+        case 1111:
+          esimd_rotary_pos_emb_ds(p0, p1, p2, p3, p4, i1, i2, i3, i4, i5, i6, i7, i8, i9, dpcpp_queue);
+        break;
+        case 1112:
+          esimd_updateKV_indexed(p0, p1, p2, i1, i2, dpcpp_queue);
         break;
         default:
           printf("---------- esimd kernel op not supported, op is %lld ----------\n", i0);

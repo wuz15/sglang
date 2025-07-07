@@ -137,6 +137,7 @@ if enable_esimd_norm_rope_opt or enable_esimd_bmm_opt:
 
 logger = logging.getLogger(__name__)
 
+
 class AttnForwardMethod(IntEnum):
     # Use multi-head attention
     MHA = auto()
@@ -946,7 +947,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             self.weight_block_size = (
                 self.fused_qkv_a_proj_with_mqa.quant_method.quant_config.weight_block_size
             )
-        
+
         self.print_bmm_kc = False
         self.print_bmm_vc = False
 
@@ -1161,7 +1162,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
         output, _ = self.o_proj(attn_output)
         return output
-    
+
     def esimd_rmsNormFuse_kq(self, q, k):
         q_out = torch.empty_like(q)
         k_out = torch.empty_like(k)
@@ -1175,13 +1176,41 @@ class DeepseekV2AttentionMLA(nn.Module):
             q = q.contiguous()
 
         esimd_kernel_uni(
-            self.q_a_layernorm.weight, self.kv_a_layernorm.weight, q, k, q_out, k_out,
-            k_out, k_out, k_out, k_out,  # weight, residual, hidden_states
-            1109, q.shape[-1], k.shape[-1], q.shape[-2], 0, 0, 0, 0, 0, 0, # hidden size, add_residual
-            self.q_a_layernorm.variance_epsilon, self.kv_a_layernorm.variance_epsilon, 1.0, 1.0, 1.0)   # self.variance_epsilon
+            self.q_a_layernorm.weight,
+            self.kv_a_layernorm.weight,
+            q,
+            k,
+            q_out,
+            k_out,
+            k_out,
+            k_out,
+            k_out,
+            k_out,  # weight, residual, hidden_states
+            1109,
+            q.shape[-1],
+            k.shape[-1],
+            q.shape[-2],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,  # hidden size, add_residual
+            self.q_a_layernorm.variance_epsilon,
+            self.kv_a_layernorm.variance_epsilon,
+            1.0,
+            1.0,
+            1.0,
+        )  # self.variance_epsilon
         return q_out, k_out
-    
-    def fp8_bmm_opt(self, input: torch.Tensor, weight: torch.Tensor, weight_scale, bias: torch.Tensor = None):
+
+    def fp8_bmm_opt(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale,
+        bias: torch.Tensor = None,
+    ):
         if weight.dtype != torch.float8_e4m3fn:
             print("fp8_bmm_opt type not supported!")
             return None
@@ -1203,12 +1232,39 @@ class DeepseekV2AttentionMLA(nn.Module):
         batch = 1
         if len(input.shape) == 3:
             batch = input.shape[-2]
-            output = torch.empty(input.shape[1], M, N, device=input.device, dtype=input.dtype)
+            output = torch.empty(
+                input.shape[1], M, N, device=input.device, dtype=input.dtype
+            )
         else:
             print("fp8_bmm_opt input shape not supported")
 
-        esimd_kernel_uni(input, weight, output, output, output, output, output, output, output, output,
-            5001, M, N, K, K_stride, batch, 1, 1, 1, 1, weight_scale, 1.0, 1.0, 1.0, 1.0)
+        esimd_kernel_uni(
+            input,
+            weight,
+            output,
+            output,
+            output,
+            output,
+            output,
+            output,
+            output,
+            output,
+            5001,
+            M,
+            N,
+            K,
+            K_stride,
+            batch,
+            1,
+            1,
+            1,
+            1,
+            weight_scale,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+        )
 
         return output
 
@@ -1287,7 +1343,11 @@ class DeepseekV2AttentionMLA(nn.Module):
         else:
             if enable_esimd_bmm_opt and q_nope.shape[0] <= 8:
                 if self.print_bmm_kc is False:
-                    print("fp8_bmm_esimd opt, q_nope, w_kc: ", q_nope.shape, self.w_kc_fp8.shape)
+                    print(
+                        "fp8_bmm_esimd opt, q_nope, w_kc: ",
+                        q_nope.shape,
+                        self.w_kc_fp8.shape,
+                    )
                     self.print_bmm_kc = True
                 q_nope_out = self.fp8_bmm_opt(q_nope, self.w_kc_fp8, self.w_scale_item)
             else:
@@ -1306,8 +1366,29 @@ class DeepseekV2AttentionMLA(nn.Module):
                 q_nope_out, k_nope, k_nope, forward_batch, q_rope=q_pe, k_rope=k_pe
             )
         else:
-            q = torch.cat([q_nope_out, q_pe], dim=-1)
-            k = torch.cat([k_nope, k_pe], dim=-1)
+            # q = torch.cat([q_nope_out, q_pe], dim=-1)
+            # k = torch.cat([k_nope, k_pe], dim=-1)
+            if not hasattr(self, "q_tmp") or self.q_tmp.shape[0] != q_nope_out.shape[0]:
+                self.q_tmp = torch.empty(
+                    q_nope_out.shape[0],
+                    q_nope_out.shape[1],
+                    self.kv_lora_rank + self.qk_rope_head_dim,
+                    device=q_nope_out.device,
+                    dtype=q_nope_out.dtype,
+                )
+                self.k_tmp = torch.empty(
+                    k_nope.shape[0],
+                    1,
+                    self.kv_lora_rank + self.qk_rope_head_dim,
+                    device=q_nope_out.device,
+                    dtype=q_nope_out.dtype,
+                )
+            q = self.q_tmp
+            k = self.k_tmp
+            q[:, :, : self.kv_lora_rank] = q_nope_out
+            k[:, :, : self.kv_lora_rank] = k_nope
+            q[:, :, self.kv_lora_rank :] = q_pe
+            k[:, :, self.kv_lora_rank :] = k_pe
             attn_output = self.attn_mqa(q, k, k_nope, forward_batch)
         attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
 
@@ -1349,9 +1430,15 @@ class DeepseekV2AttentionMLA(nn.Module):
         else:
             if enable_esimd_bmm_opt and attn_output.shape[0] <= 8:
                 if self.print_bmm_vc is False:
-                    print("fp8_bmm_esimd opt, attn_output, w_vc: ", attn_output.shape, self.w_vc_fp8.shape)
+                    print(
+                        "fp8_bmm_esimd opt, attn_output, w_vc: ",
+                        attn_output.shape,
+                        self.w_vc_fp8.shape,
+                    )
                     self.print_bmm_vc = True
-                attn_bmm_output = self.fp8_bmm_opt(attn_output, self.w_vc_fp8, self.w_scale_item)
+                attn_bmm_output = self.fp8_bmm_opt(
+                    attn_output, self.w_vc_fp8, self.w_scale_item
+                )
             else:
                 attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
         attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)

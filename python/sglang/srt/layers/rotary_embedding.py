@@ -14,6 +14,12 @@ _is_cuda = is_cuda()
 _is_hip = is_hip()
 _is_cpu_amx = cpu_has_amx_support()
 
+import os
+
+enable_esimd_opt = bool(int(os.getenv("ENABLE_ESIMD_NORM_ROPE_OPT", "0")))
+if enable_esimd_opt:
+    from sgl_kernel_esimd import esimd_kernel_uni
+
 if _is_cuda:
     from sgl_kernel import apply_rope_with_cos_sin_cache_inplace
 
@@ -686,6 +692,50 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
+        if enable_esimd_opt and not self.is_neox_style:
+            offsets_in = positions
+            has_offset = 0
+            if offsets:
+                offsets_in = offsets
+                has_offset = 1
+
+            query_f = query
+            key_f = key
+
+            # need meet query stride limitation or will clone
+            if query_f.stride()[-3] != query_f.stride()[-2] * query_f.shape[-2]:
+                query_f = query.clone()
+
+            esimd_kernel_uni(
+                query_f,
+                key_f,
+                self.cos_sin_cache,
+                positions,
+                offsets_in,
+                offsets_in,
+                offsets_in,
+                offsets_in,
+                offsets_in,
+                offsets_in,
+                1111,
+                query_f.shape[-2],
+                query_f.shape[-1],
+                query_f.stride()[-2],
+                key_f.shape[-2],
+                key_f.shape[-1],
+                key_f.stride()[-2],
+                key_f.stride()[-3],
+                query_f.shape[0],
+                has_offset,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+            )
+
+            return query_f, key_f
+
         dtype = query.dtype
         query_rot = query[..., : self.rotary_dim]
         key_rot = key[..., : self.rotary_dim]
