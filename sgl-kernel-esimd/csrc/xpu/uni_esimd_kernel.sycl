@@ -702,6 +702,7 @@ void esimd_rotary_pos_emb_ds(uint8_t* qState, uint8_t* kState, uint8_t* cos_sin_
  void esimd_updateKV_indexed(
   uint8_t* kv_cache, uint8_t* loc, uint8_t* kv_input,
   int64_t kv_hd,
+  int64_t kv_stride,
   int64_t update_len,
 
   sycl::queue& dpcpp_queue)
@@ -738,7 +739,7 @@ void esimd_rotary_pos_emb_ds(uint8_t* qState, uint8_t* kState, uint8_t* cos_sin_
             256,
             __ESIMD_ENS::lsc_data_size::default_size,
             __ESIMD_ENS::cache_hint::cached,
-            __ESIMD_ENS::cache_hint::cached>((uint8_t*)kv_input + (h * kv_hd + hh * 128) * sizeof(fp16));
+            __ESIMD_ENS::cache_hint::cached>((uint8_t*)kv_input + (h * kv_stride + hh * 128) * sizeof(fp16));
 
           __ESIMD_ENS::lsc_block_store<
             fp16,
@@ -755,7 +756,7 @@ void esimd_rotary_pos_emb_ds(uint8_t* qState, uint8_t* kState, uint8_t* cos_sin_
             128,
             __ESIMD_ENS::lsc_data_size::default_size,
             __ESIMD_ENS::cache_hint::cached,
-            __ESIMD_ENS::cache_hint::cached>((uint8_t*)kv_input + (h * kv_hd + hh * 128) * sizeof(fp16));
+            __ESIMD_ENS::cache_hint::cached>((uint8_t*)kv_input + (h * kv_stride + hh * 128) * sizeof(fp16));
 
           __ESIMD_ENS::lsc_block_store<
             fp16,
@@ -840,7 +841,7 @@ at::Tensor esimd_kernel_uni(
           esimd_rotary_pos_emb_ds(p0, p1, p2, p3, p4, i1, i2, i3, i4, i5, i6, i7, i8, i9, dpcpp_queue);
         break;
         case 1112:
-          esimd_updateKV_indexed(p0, p1, p2, i1, i2, dpcpp_queue);
+          esimd_updateKV_indexed(p0, p1, p2, i1, i2, i3, dpcpp_queue);
         break;
         default:
           printf("---------- esimd kernel op not supported, op is %lld ----------\n", i0);
