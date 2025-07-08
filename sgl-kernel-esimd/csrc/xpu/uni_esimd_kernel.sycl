@@ -17,11 +17,11 @@
 #include "esimd_kernels/rotary_pos_emb.h"
 
 void esimd_add(uint8_t* a, uint8_t* b, uint8_t* c, int64_t len, sycl::queue& q){
-    sycl::range<1> LocalRange(16);
+    sycl::range<1> LocalRange(1);
     sycl::range<1> GlobalRange(len / 128);
 
     sycl::nd_range<1> Range(GlobalRange, LocalRange);
-    printf("--- global, local: %d, %d\n", 16, len / 128);
+    // printf("--- global, local: %d, %d\n", 16, len / 128);
     sycl::event e;
     try {
       {
@@ -45,9 +45,9 @@ at::Tensor esimd_add(
     int64_t i0
     )
     {
-      auto p0 = reinterpret_cast<uint8_t*>(_p0.data_ptr<at::Half>());
-      auto p1 = reinterpret_cast<uint8_t*>(_p1.data_ptr<at::Half>());
-      auto p2 = reinterpret_cast<uint8_t*>(_p2.data_ptr<at::Half>());
+      auto p0 = reinterpret_cast<uint8_t*>(_p0.data_ptr());
+      auto p1 = reinterpret_cast<uint8_t*>(_p1.data_ptr());
+      auto p2 = reinterpret_cast<uint8_t*>(_p2.data_ptr());
       auto stream = at::xpu::getCurrentXPUStream();
       auto dpcpp_queue = stream.queue();
 
