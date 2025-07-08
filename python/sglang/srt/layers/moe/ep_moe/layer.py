@@ -945,53 +945,34 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
             topk_weights, topk_ids
         )
         n_tokens = hidden_states.shape[0]
-        if hidden_states.device.type in ["xpu", "cuda"]:
-            if (
-                hidden_states.device.type == "cuda"
-                and torch.cuda.is_current_stream_capturing()
-                or n_tokens <= self.cached_tensors_size
-            ):
-                if hidden_states.device.type == "cuda":
-                    assert n_tokens <= self.cached_tensors_size
-                # we are switching to next set, so prepare and enqueue must be together
-                # there cannot be other prepare or enqueue in between
-                # please make sure check operation strategies won't break this assumption
-                self._switch_to_next_tensor_set()
-                self.fill_cpu_tensors(
-                    hidden_states, sorted_topk_ids, sorted_topk_weights
-                )
-            else:
-                # FIXME: redundant code
-                # these are safe as only decode will run bto heto
-                self.adhoc_cpu_result = torch.zeros_like(
-                    hidden_states,
-                    device=self.device,
-                    pin_memory=True,
-                    dtype=torch.bfloat16,
-                )
-                self.adhoc_hidden_states_cpu = hidden_states.to(
-                    self.device,
-                    non_blocking=True,
-                    dtype=torch.bfloat16,
-                )
-                self.adhoc_sorted_topk_ids_cpu = sorted_topk_ids.to(
-                    self.device, non_blocking=True, dtype=torch.int32
-                )
-                self.adhoc_sorted_topk_weights_cpu = sorted_topk_weights.to(
-                    self.device, non_blocking=True
-                )
+        if (
+            hidden_states.device.type == "cuda"
+            and torch.cuda.is_current_stream_capturing()
+            or n_tokens <= self.cached_tensors_size
+        ):
+            if hidden_states.device.type == "cuda":
+                assert n_tokens <= self.cached_tensors_size
+            # we are switching to next set, so prepare and enqueue must be together
+            # there cannot be other prepare or enqueue in between
+            # please make sure check operation strategies won't break this assumption
+            self._switch_to_next_tensor_set()
+            self.fill_cpu_tensors(hidden_states, sorted_topk_ids, sorted_topk_weights)
         else:
+            # FIXME: redundant code
+            # these are safe as only decode will run bto heto
+            pin_memory = None if hidden_states.device.type == "cpu" else True
             self.adhoc_cpu_result = torch.zeros_like(
                 hidden_states,
-                dtype=torch.bfloat16,
                 device=self.device,
+                pin_memory=pin_memory,
+                dtype=torch.bfloat16,
             )
             self.adhoc_hidden_states_cpu = hidden_states.to(
                 self.device,
                 non_blocking=True,
                 dtype=torch.bfloat16,
             )
-            self.adhoc_sorted_topk_ids_cpu = sorted_topk_ids.to().to(
+            self.adhoc_sorted_topk_ids_cpu = sorted_topk_ids.to(
                 self.device, non_blocking=True, dtype=torch.int32
             )
             self.adhoc_sorted_topk_weights_cpu = sorted_topk_weights.to(
@@ -1003,63 +984,44 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
             raise RuntimeError(f"Cpu moe engine is not created.")
 
         n_tokens = hidden_states.shape[0]
-        # FIXME: redundant code
+        if n_tokens <= self.cached_tensors_size:
+            forward_experts_func = self.cpu_moe_engine.forward_experts(
+                self.cpu_hidden_states.data_ptr(),
+                self.cpu_sorted_topk_ids.data_ptr(),
+                self.cpu_sorted_topk_weights.data_ptr(),
+                self.cpu_result.data_ptr(),
+                n_tokens,
+            )
+            result = self.cpu_result[:n_tokens]
+        else:
+            forward_experts_func = self.cpu_moe_engine.forward_experts(
+                self.adhoc_hidden_states_cpu.data_ptr(),
+                self.adhoc_sorted_topk_ids_cpu.data_ptr(),
+                self.adhoc_sorted_topk_weights_cpu.data_ptr(),
+                self.adhoc_cpu_result.data_ptr(),
+                n_tokens,
+            )
+            result = self.adhoc_cpu_result
+
         if hidden_states.device.type == "cuda":
-            if (
-                torch.cuda.is_current_stream_capturing()
-                or n_tokens <= self.cached_tensors_size
-            ):
-                self.cpu_infer.submit_with_cuda_stream(
-                    torch.cuda.current_stream(hidden_states.device).cuda_stream,
-                    self.cpu_moe_engine.forward_experts(
-                        self.cpu_hidden_states.data_ptr(),
-                        self.cpu_sorted_topk_ids.data_ptr(),
-                        self.cpu_sorted_topk_weights.data_ptr(),
-                        self.cpu_result.data_ptr(),
-                        n_tokens,
-                    ),
-                )
-                return self.cpu_result[:n_tokens]
-            else:
-                self.cpu_infer.submit_with_cuda_stream(
-                    torch.cuda.current_stream(hidden_states.device).cuda_stream,
-                    self.cpu_moe_engine.forward_experts(
-                        self.adhoc_hidden_states_cpu.data_ptr(),
-                        self.adhoc_sorted_topk_ids_cpu.data_ptr(),
-                        self.adhoc_sorted_topk_weights_cpu.data_ptr(),
-                        self.adhoc_cpu_result.data_ptr(),
-                        n_tokens,
-                    ),
-                )
-                return self.adhoc_cpu_result
+            if torch.cuda.is_current_stream_capturing():
+                assert n_tokens <= self.cached_tensors_size
+
+            self.cpu_infer.submit_with_cuda_stream(
+                torch.cuda.current_stream(hidden_states.device).cuda_stream,
+                forward_experts_func,
+            )
         elif hidden_states.device.type in ["cpu", "xpu"]:
-            torch.get_device_module(hidden_states.device).synchronize()
-            if n_tokens <= self.cached_tensors_size:
-                self.cpu_infer.submit(
-                    self.cpu_moe_engine.forward_experts(
-                        self.cpu_hidden_states.data_ptr(),
-                        self.cpu_sorted_topk_ids.data_ptr(),
-                        self.cpu_sorted_topk_weights.data_ptr(),
-                        self.cpu_result.data_ptr(),
-                        n_tokens,
-                    ),
-                )
-                return self.cpu_result[:n_tokens]
-            else:
-                self.cpu_infer.submit(
-                    self.cpu_moe_engine.forward_experts(
-                        self.adhoc_hidden_states_cpu.data_ptr(),
-                        self.adhoc_sorted_topk_ids_cpu.data_ptr(),
-                        self.adhoc_sorted_topk_weights_cpu.data_ptr(),
-                        self.adhoc_cpu_result.data_ptr(),
-                        n_tokens,
-                    ),
-                )
-            return self.adhoc_cpu_result
+            torch.get_device_module(hidden_states.device).synchronize(
+                hidden_states.device
+            )
+            self.cpu_infer.submit(forward_experts_func)
         else:
             raise ValueError(
                 f"Unsupported device: {hidden_states.device}. Only cuda, xpu and cpu are supported now"
             )
+
+        return result
 
     def forward_sync(self, hidden_states_device):
         if hidden_states_device.type == "cuda":
