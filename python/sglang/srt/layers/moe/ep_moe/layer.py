@@ -664,6 +664,8 @@ class EPMoESparse(EPMoE):
         self.start_expert_id = 0
         self.end_expert_id = local_expert_count - 1
         assert local_expert_count == self.num_experts_per_partition
+        # topk_ids is the global expert ids, we need to map them to local expert ids
+        self.need_map_topk = self.num_experts_per_partition != self.num_experts
 
     def weight_loader(self, param, loaded_weight, weight_name, shard_id, expert_id):
         local_expert_id = self.expert_id_to_local[expert_id]
@@ -674,7 +676,9 @@ class EPMoESparse(EPMoE):
     def select_experts(self, **kwargs):
         topk_weights, topk_ids = select_experts(**kwargs)
 
-        return topk_weights, self.map_expertid_to_local_experts(topk_ids)
+        if self.need_map_topk:
+            topk_ids = self.map_expertid_to_local_experts(topk_ids)
+        return topk_weights, topk_ids
 
     def map_expertid_to_local_experts(self, topk_ids):
         if self.expert_id_to_local_tensor is None:
@@ -819,6 +823,11 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
             topk_group,
         )
         self.cpu_moe_engine = None
+
+        # when not all experts are in the partition, we set -1 for experts not in the partition
+        # xft requires -1 to be at end of the list, so we need to sort top k
+        self.need_sort_topk = self.num_experts_per_partition != self.num_experts
+
         # CPUInfer doesn't need correction_bias but we need to keep the interface consistent
         self.dummy_correction_bias = torch.zeros(
             self.num_experts, device=self.device, dtype=torch.float
@@ -908,21 +917,24 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
             gc.collect()
 
     def _sort_topk_ids(self, topk_weights: torch.Tensor, topk_ids: torch.Tensor):
-        # Get the sort indices (descending order)
-        sorted_topk_ids, sort_indices = torch.sort(topk_ids, dim=1, descending=True)
+        if self.need_sort_topk:
+            # Get the sort indices (descending order)
+            sorted_topk_ids, sort_indices = torch.sort(topk_ids, dim=1, descending=True)
 
-        # Create batch indices for gathering
-        batch_size = topk_ids.shape[0]
-        batch_indices = (
-            torch.arange(batch_size, device=topk_ids.device)
-            .unsqueeze(1)
-            .expand_as(sort_indices)
-        )
+            # Create batch indices for gathering
+            batch_size = topk_ids.shape[0]
+            batch_indices = (
+                torch.arange(batch_size, device=topk_ids.device)
+                .unsqueeze(1)
+                .expand_as(sort_indices)
+            )
 
-        # Sort both tensors using the same ordering
-        sorted_topk_weights = topk_weights[batch_indices, sort_indices]
+            # Sort both tensors using the same ordering
+            sorted_topk_weights = topk_weights[batch_indices, sort_indices]
 
-        return sorted_topk_weights, sorted_topk_ids
+            return sorted_topk_weights, sorted_topk_ids
+        else:
+            return topk_weights, topk_ids
 
     def forward_start(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
         self.forward_prepare(hidden_states, router_logits)
