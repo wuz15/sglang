@@ -129,7 +129,8 @@ at::Tensor esimd_add(
     at::Tensor _p1,
     at::Tensor _p2,
 
-    int64_t i0
+    int64_t i0,
+    double factor
     );
 
 at::Tensor esimd_kernel_uni(

@@ -853,7 +853,7 @@ class TritonAttnBackend(AttentionBackend):
             if prefix_len != 0:
                 is_prefill = False
 
-        if False and enable_esimd_opt and is_prefill:
+        if enable_esimd_opt and is_prefill:
             if not self.printed_info_prefill:
                 print(
                     "esimd MLA prefill, shapes: q, k, v, o, kv_indptr, kv_indices",

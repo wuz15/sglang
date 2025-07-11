@@ -16,7 +16,7 @@ from sgl_kernel_esimd.gemm import (
     awq_dequantize,
 )
 from sgl_kernel_esimd.esimd_ops import (
-    esimd_add,
+    esimd_mul_scale_factor_and_add,
     esimd_kernel_uni,
     esimd_mul_lgrf,
     esimd_kernel_uni_lgrf,

@@ -511,7 +511,7 @@ class Fp8LinearMethod(LinearMethodBase):
             return output
 
         if not self.printed_info_gemv:
-            # print("running fp8 esimd GEMV opt kernel: M, N, K", M, " ", N, " ", K)
+            print("running fp8 esimd GEMV opt kernel: M, N, K", M, " ", N, " ", K)
             self.printed_info_gemv = True
 
         batch = 1

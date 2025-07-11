@@ -63,6 +63,11 @@ _is_hip = is_hip()
 if _is_hip:
     from vllm._custom_ops import scaled_fp8_quant
 
+import os
+enable_esimd_opt = bool(int(os.getenv("ENABLE_ESIMD_TOPK_OPT", "0")))
+if enable_esimd_opt:
+    from sgl_kernel_esimd import esimd_kernel_uni
+
 logger = logging.getLogger(__name__)
 
 
@@ -844,6 +849,10 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
         )
         self._create_expected_weights_set()
 
+        # Assume cached_tensors_size when turn on topk preprocess opt
+        if enable_esimd_opt:
+            assert self.cached_tensors_size >= 8
+
     def _create_expected_weights_set(self):
         # create a set of weights names to be loaded,
         # so we can check if all weights are loaded
@@ -941,55 +950,70 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
         return self.forward_enqueue(hidden_states)
 
     def forward_prepare(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
-        topk_weights, topk_ids = self.select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            top_k=self.top_k,
-            use_grouped_topk=self.use_grouped_topk,
-            renormalize=self.renormalize,
-            topk_group=self.topk_group,
-            num_expert_group=self.num_expert_group,
-            correction_bias=self.correction_bias,
-            custom_routing_function=self.custom_routing_function,
-            routed_scaling_factor=self.routed_scaling_factor,
-        )
-        sorted_topk_weights, sorted_topk_ids = self._sort_topk_ids(
-            topk_weights, topk_ids
-        )
         n_tokens = hidden_states.shape[0]
-        if (
-            hidden_states.device.type == "cuda"
-            and torch.cuda.is_current_stream_capturing()
-            or n_tokens <= self.cached_tensors_size
-        ):
-            if hidden_states.device.type == "cuda":
-                assert n_tokens <= self.cached_tensors_size
-            # we are switching to next set, so prepare and enqueue must be together
-            # there cannot be other prepare or enqueue in between
-            # please make sure check operation strategies won't break this assumption
+        if enable_esimd_opt and n_tokens <= 8:
+            assert self.need_sort_topk == False
             self._switch_to_next_tensor_set()
-            self.fill_cpu_tensors(hidden_states, sorted_topk_ids, sorted_topk_weights)
+
+            renormalize_weight = 0
+            if self.renormalize:
+                renormalize_weight = 1
+            esimd_kernel_uni(
+                router_logits, self.correction_bias, self.cpu_sorted_topk_weights, self.cpu_sorted_topk_ids, 
+                self.cpu_hidden_states, hidden_states, self.gate.weight, hidden_states, hidden_states, hidden_states,
+                1610, self.top_k, self.topk_group, self.num_expert_group, n_tokens, renormalize_weight, 
+                0, 0, 0, 0,
+                self.routed_scaling_factor, 1.0, 1.0, 1.0, 1.0)
         else:
-            # FIXME: redundant code
-            # these are safe as only decode will run bto heto
-            pin_memory = None if hidden_states.device.type == "cpu" else True
-            self.adhoc_cpu_result = torch.zeros_like(
-                hidden_states,
-                device=self.device,
-                pin_memory=pin_memory,
-                dtype=torch.bfloat16,
+            topk_weights, topk_ids = self.select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                top_k=self.top_k,
+                use_grouped_topk=self.use_grouped_topk,
+                renormalize=self.renormalize,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                correction_bias=self.correction_bias,
+                custom_routing_function=self.custom_routing_function,
+                routed_scaling_factor=self.routed_scaling_factor,
             )
-            self.adhoc_hidden_states_cpu = hidden_states.to(
-                self.device,
-                non_blocking=True,
-                dtype=torch.bfloat16,
+            sorted_topk_weights, sorted_topk_ids = self._sort_topk_ids(
+                topk_weights, topk_ids
             )
-            self.adhoc_sorted_topk_ids_cpu = sorted_topk_ids.to(
-                self.device, non_blocking=True, dtype=torch.int32
-            )
-            self.adhoc_sorted_topk_weights_cpu = sorted_topk_weights.to(
-                self.device, non_blocking=True
-            )
+            
+            if (
+                hidden_states.device.type == "cuda"
+                and torch.cuda.is_current_stream_capturing()
+                or n_tokens <= self.cached_tensors_size
+            ):
+                if hidden_states.device.type == "cuda":
+                    assert n_tokens <= self.cached_tensors_size
+                # we are switching to next set, so prepare and enqueue must be together
+                # there cannot be other prepare or enqueue in between
+                # please make sure check operation strategies won't break this assumption
+                self._switch_to_next_tensor_set()
+                self.fill_cpu_tensors(hidden_states, sorted_topk_ids, sorted_topk_weights)
+            else:
+                # FIXME: redundant code
+                # these are safe as only decode will run bto heto
+                pin_memory = None if hidden_states.device.type == "cpu" else True
+                self.adhoc_cpu_result = torch.zeros_like(
+                    hidden_states,
+                    device=self.device,
+                    pin_memory=pin_memory,
+                    dtype=torch.bfloat16,
+                )
+                self.adhoc_hidden_states_cpu = hidden_states.to(
+                    self.device,
+                    non_blocking=True,
+                    dtype=torch.bfloat16,
+                )
+                self.adhoc_sorted_topk_ids_cpu = sorted_topk_ids.to(
+                    self.device, non_blocking=True, dtype=torch.int32
+                )
+                self.adhoc_sorted_topk_weights_cpu = sorted_topk_weights.to(
+                    self.device, non_blocking=True
+                )
 
     def forward_enqueue(self, hidden_states: torch.Tensor):
         if self.cpu_moe_engine is None:
@@ -1240,13 +1264,24 @@ class EPMoEHeto(EPMoESparse):
         self.forward_routed_experts_sync(
             hidden_states_device,
         )
-        result = self.forward_routed_experts_combine(
-            hidden_states_shape,
-            hidden_states_device,
-            hidden_states_dtype,
-            gpu_result,
-            cpu_result,
-        )
+        n_tokens = hidden_states.shape[0]
+        if enable_esimd_opt and n_tokens <= 8:
+            if self.cpu_moe and gpu_result:
+                result = cpu_result + gpu_result.cpu()
+            elif self.cpu_moe:
+                result = cpu_result
+            elif gpu_result:
+                result = gpu_result.cpu()
+            else:
+                result = None
+        else:
+            result = self.forward_routed_experts_combine(
+                hidden_states_shape,
+                hidden_states_device,
+                hidden_states_dtype,
+                gpu_result,
+                cpu_result,
+            )
         return result, shared_output
 
     def forward_routed_experts_prepare(

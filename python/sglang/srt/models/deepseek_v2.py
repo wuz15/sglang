@@ -133,7 +133,8 @@ if _use_aiter:
 enable_esimd_norm_rope_opt = bool(int(os.getenv("ENABLE_ESIMD_NORM_ROPE_OPT", "0")))
 enable_esimd_bmm_opt = bool(int(os.getenv("ENABLE_ESIMD_FP8_GEMM_OPT", "0")))
 if enable_esimd_norm_rope_opt or enable_esimd_bmm_opt:
-    from sgl_kernel_esimd import esimd_kernel_uni
+    from sgl_kernel_esimd import esimd_kernel_uni, esimd_mul_scale_factor_and_add
+enable_esimd_opt = bool(int(os.getenv("ENABLE_ESIMD_TOPK_OPT", "0")))
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +304,10 @@ class DeepseekV2MoE(nn.Module):
             **additional_config,
         )
 
+        if enable_esimd_opt and hasattr(self.experts, "cpu_moe") and self.experts.cpu_moe is not None:
+            self.experts.cpu_moe.gate = self.gate
+        self.experts.gate_out_features = self.gate.weight.shape[0]
+
         self.shared_experts_is_int8 = False
         self.shared_experts_is_fp8 = False
         self.shared_experts_weight_block_size = None
@@ -391,9 +396,15 @@ class DeepseekV2MoE(nn.Module):
         ):
             return self.forward_cpu(hidden_states)
 
-        router_logits = self.gate(hidden_states)
+        n_tokens = hidden_states.shape[0]
+        if enable_esimd_opt and n_tokens <= 8:
+            # do not call gate and gate is fused w/ topk
+            final_hidden_states = torch.empty(hidden_states.shape[0], hidden_states.shape[1], dtype=hidden_states.dtype, device=hidden_states.device)
+            router_logits = torch.empty(hidden_states.shape[0], self.experts.gate_out_features, dtype=hidden_states.dtype, device=hidden_states.device)
+        else:
+            router_logits = self.gate(hidden_states)
         if global_server_args_dict["enable_ep_moe_heto"]:
-            final_hidden_states, shared_output = self.experts(
+            final_hidden_states_expects_out, shared_output = self.experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 op_shared_experts=self._forward_shared_experts,
@@ -406,10 +417,24 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states=hidden_states, router_logits=router_logits
             )
 
-        if global_server_args_dict["enable_ep_moe_heto"] or not _is_cuda:
-            final_hidden_states *= self.routed_scaling_factor
-        if shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
+        if enable_esimd_opt and n_tokens <= 8:
+            if final_hidden_states_expects_out is not None:
+                esimd_mul_scale_factor_and_add(
+                        final_hidden_states_expects_out,  # bf16
+                        shared_output,   # fp16
+                        final_hidden_states,    # fp16
+                        final_hidden_states_expects_out.shape[0] * final_hidden_states_expects_out.shape[1],
+                        self.routed_scaling_factor  # float
+                    )
+            else:
+                final_hidden_states = shared_output
+            
+        else:
+            final_hidden_states = final_hidden_states_expects_out
+            if global_server_args_dict["enable_ep_moe_heto"] or not _is_cuda:
+                final_hidden_states *= self.routed_scaling_factor
+            if shared_output is not None:
+                final_hidden_states = final_hidden_states + shared_output
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)

@@ -3,10 +3,10 @@ from typing import List, Optional, Tuple
 import torch
 
 
-def esimd_add(
-    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, len: int
+def esimd_mul_scale_factor_and_add(
+    a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, len: int, factor: float
 ) -> torch.ByteTensor:
-    return torch.ops.sgl_kernel_esimd.esimd_add(a, b, c, len)
+    return torch.ops.sgl_kernel_esimd.esimd_add(a, b, c, len, factor)
 
 def esimd_kernel_uni(
     t0: torch.Tensor, t1: torch.Tensor, t2: torch.Tensor, t3: torch.Tensor, t4: torch.Tensor, t5: torch.Tensor, t6: torch.Tensor, t7: torch.Tensor, t8: torch.Tensor, t9: torch.Tensor,
