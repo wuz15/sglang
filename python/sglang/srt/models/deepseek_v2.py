@@ -765,6 +765,9 @@ class DeepseekV2MoE(nn.Module):
         else:
             final_hidden_states *= self.routed_scaling_factor
 
+        if self.tp_size > 1:
+            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+
         state.hidden_states_mlp_output = final_hidden_states
 
 
