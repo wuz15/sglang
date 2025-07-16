@@ -580,8 +580,14 @@ class DeepseekV2MoE(nn.Module):
         if is_non_idle_and_non_empty(
             state.forward_batch.forward_mode, state.hidden_states_mlp_input
         ):
-            # router_logits: (num_tokens, n_experts)
-            state.router_logits = self.gate(state.hidden_states_mlp_input)
+            shidden_states_mlp_input = state.hidden_states_mlp_input
+            n_tokens = state.hidden_states_mlp_input.shape[0]
+            if enable_esimd_opt and n_tokens <= 8:
+                # do not call gate and gate is fused w/ topk
+                state.router_logits = torch.empty(shidden_states_mlp_input.shape[0], self.experts.gate_out_features, dtype=shidden_states_mlp_input.dtype, device=shidden_states_mlp_input.device)
+            else:
+                # router_logits: (num_tokens, n_experts)
+                state.router_logits = self.gate(state.hidden_states_mlp_input)
         else:
             state.router_logits = None
 
@@ -642,16 +648,29 @@ class DeepseekV2MoE(nn.Module):
         hidden_states_device = state.pop("hidden_states_device")
         hidden_states_dtype = state.pop("hidden_states_dtype")
         state.pop("hidden_states_mlp_input")
+        state.n_tokens = hidden_states_shape[0]
         if (
             state.forward_batch.forward_mode is not None
         ) and not state.forward_batch.forward_mode.is_idle():
-            combined = self.experts.forward_routed_experts_combine(
-                hidden_states_shape=hidden_states_shape,
-                hidden_states_device=hidden_states_device,
-                hidden_states_dtype=hidden_states_dtype,
-                gpu_result=state.pop("gpu_experts_result"),
-                cpu_result=state.pop("cpu_experts_result"),
-            )
+            if enable_esimd_opt and state.n_tokens <= 8:
+                gpu_result=state.pop("gpu_experts_result")
+                cpu_result=state.pop("cpu_experts_result")
+                if self.experts.cpu_moe and gpu_result:
+                    combined = cpu_result + gpu_result.cpu()
+                elif self.experts.cpu_moe:
+                    combined = cpu_result
+                elif gpu_result:
+                    combined = gpu_result.cpu()
+                else:
+                    combined = None
+            else:
+                combined = self.experts.forward_routed_experts_combine(
+                    hidden_states_shape=hidden_states_shape,
+                    hidden_states_device=hidden_states_device,
+                    hidden_states_dtype=hidden_states_dtype,
+                    gpu_result=state.pop("gpu_experts_result"),
+                    cpu_result=state.pop("cpu_experts_result"),
+                )
             state.hidden_states_after_combine = combined
         else:
             state.hidden_states_after_combine = None
@@ -756,14 +775,29 @@ class DeepseekV2MoE(nn.Module):
             )
 
     def op_output(self, state):
-        final_hidden_states = state.pop("hidden_states_after_combine")
-
-        if (shared_output := state.pop("shared_output")) is not None:
-            x = shared_output
-            x.add_(final_hidden_states, alpha=self.routed_scaling_factor)
-            final_hidden_states = x
+        final_hidden_states_expects_out = state.pop("hidden_states_after_combine")
+        n_tokens = state.pop("n_tokens")
+        if enable_esimd_opt and n_tokens <= 8:
+            shared_output = state.pop("shared_output")
+            final_hidden_states = torch.empty_like(shared_output)
+            if final_hidden_states_expects_out is not None:
+                esimd_mul_scale_factor_and_add(
+                        final_hidden_states_expects_out,  # bf16
+                        shared_output,   # fp16
+                        final_hidden_states,    # fp16
+                        final_hidden_states_expects_out.shape[0] * final_hidden_states_expects_out.shape[1],
+                        self.routed_scaling_factor  # float
+                    )
+            else:
+                final_hidden_states = shared_output
         else:
-            final_hidden_states *= self.routed_scaling_factor
+            final_hidden_states = final_hidden_states_expects_out
+            if (shared_output := state.pop("shared_output")) is not None:
+                x = shared_output
+                x.add_(final_hidden_states, alpha=self.routed_scaling_factor)
+                final_hidden_states = x
+            else:
+                final_hidden_states *= self.routed_scaling_factor
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
