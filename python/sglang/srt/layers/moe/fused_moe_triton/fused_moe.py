@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import torch
 import triton
 import triton.language as tl
-from sglang.srt.utils import is_xpu
+
 from sglang.srt.layers.moe.topk import select_experts
 from sglang.srt.layers.quantization.fp8_kernel import (
     per_token_group_quant_fp8,
@@ -30,6 +30,7 @@ from sglang.srt.utils import (
     get_device_name,
     is_cuda,
     is_hip,
+    is_xpu,
     log_info_on_rank0,
     next_power_of_2,
 )
@@ -1649,14 +1650,19 @@ def fused_experts_impl(
             else:
                 # use torch native instead of IPEX silu_and_mul
                 # TODO: customized kernel?
-                #d = intermediate_cache1.size(-1) // 2
-                #x1, x2 = torch.split(intermediate_cache1, split_size_or_sections=d, dim=-1)
-                #intermediate_cache2 = torch.nn.functional.silu(x1) * x2
+                # d = intermediate_cache1.size(-1) // 2
+                # x1, x2 = torch.split(intermediate_cache1, split_size_or_sections=d, dim=-1)
+                # intermediate_cache2 = torch.nn.functional.silu(x1) * x2
                 intermediate_cache1_tmp = intermediate_cache1.view(-1, N)
-                intermediate_cache1_tmp_half = intermediate_cache1_tmp[:,:N//2]
-                intermediate_cache1_tmp[:,:N//2] = torch.nn.functional.silu(intermediate_cache1_tmp_half)
+                intermediate_cache1_tmp_half = intermediate_cache1_tmp[:, : N // 2]
+                intermediate_cache1_tmp[:, : N // 2] = torch.nn.functional.silu(
+                    intermediate_cache1_tmp_half
+                )
 
-                intermediate_cache2[...] = intermediate_cache1_tmp[:,:N//2] * intermediate_cache1_tmp[:,N//2:]
+                intermediate_cache2[...] = (
+                    intermediate_cache1_tmp[:, : N // 2]
+                    * intermediate_cache1_tmp[:, N // 2 :]
+                )
 
                 # vllm_ops.silu_and_mul(
                 #     intermediate_cache2, intermediate_cache1.view(-1, N)

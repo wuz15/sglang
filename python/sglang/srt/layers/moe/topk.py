@@ -50,9 +50,11 @@ if _is_cuda or _is_hip:
     from sgl_kernel import topk_softmax
 
 import os
+
 enable_esimd_opt = bool(int(os.getenv("ENABLE_ESIMD_TOPK_OPT", "0")))
 if enable_esimd_opt:
     from sgl_kernel_esimd import esimd_kernel_uni
+
 
 def fused_topk_native(
     hidden_states: torch.Tensor,
@@ -242,17 +244,46 @@ def biased_grouped_topk_impl(
 
     if enable_esimd_opt:
         num_token = gating_output.shape[0]
-        topk_weights_fused = torch.empty(gating_output.shape[0], topk, device=gating_output.device, dtype=torch.float32)
-        topk_ids_fused = torch.empty(gating_output.shape[0], topk, device=gating_output.device, dtype=torch.int32)
+        topk_weights_fused = torch.empty(
+            gating_output.shape[0],
+            topk,
+            device=gating_output.device,
+            dtype=torch.float32,
+        )
+        topk_ids_fused = torch.empty(
+            gating_output.shape[0], topk, device=gating_output.device, dtype=torch.int32
+        )
 
         renormalize_weight = 0
         if renormalize:
             renormalize_weight = 1
         esimd_kernel_uni(
-            gating_output, correction_bias, topk_weights_fused, topk_ids_fused, topk_ids_fused, topk_ids_fused, topk_ids_fused, topk_ids_fused, topk_ids_fused, topk_ids_fused,
-            1110, topk, topk_group, num_expert_group, num_token, renormalize_weight, 
-            0, 0, 0, 0,
-            routed_scaling_factor, 1.0, 1.0, 1.0, 1.0)
+            gating_output,
+            correction_bias,
+            topk_weights_fused,
+            topk_ids_fused,
+            topk_ids_fused,
+            topk_ids_fused,
+            topk_ids_fused,
+            topk_ids_fused,
+            topk_ids_fused,
+            topk_ids_fused,
+            1110,
+            topk,
+            topk_group,
+            num_expert_group,
+            num_token,
+            renormalize_weight,
+            0,
+            0,
+            0,
+            0,
+            routed_scaling_factor,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+        )
 
         return topk_weights_fused, topk_ids_fused
 

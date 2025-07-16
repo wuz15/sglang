@@ -304,7 +304,11 @@ class DeepseekV2MoE(nn.Module):
             **additional_config,
         )
 
-        if enable_esimd_opt and hasattr(self.experts, "cpu_moe") and self.experts.cpu_moe is not None:
+        if (
+            enable_esimd_opt
+            and hasattr(self.experts, "cpu_moe")
+            and self.experts.cpu_moe is not None
+        ):
             self.experts.cpu_moe.gate = self.gate
         self.experts.gate_out_features = self.gate.weight.shape[0]
 
@@ -399,8 +403,18 @@ class DeepseekV2MoE(nn.Module):
         n_tokens = hidden_states.shape[0]
         if enable_esimd_opt and n_tokens <= 8:
             # do not call gate and gate is fused w/ topk
-            final_hidden_states = torch.empty(hidden_states.shape[0], hidden_states.shape[1], dtype=hidden_states.dtype, device=hidden_states.device)
-            router_logits = torch.empty(hidden_states.shape[0], self.experts.gate_out_features, dtype=hidden_states.dtype, device=hidden_states.device)
+            final_hidden_states = torch.empty(
+                hidden_states.shape[0],
+                hidden_states.shape[1],
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            router_logits = torch.empty(
+                hidden_states.shape[0],
+                self.experts.gate_out_features,
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
         else:
             router_logits = self.gate(hidden_states)
         if global_server_args_dict["enable_ep_moe_heto"]:
@@ -420,15 +434,16 @@ class DeepseekV2MoE(nn.Module):
         if enable_esimd_opt and n_tokens <= 8:
             if final_hidden_states_expects_out is not None:
                 esimd_mul_scale_factor_and_add(
-                        final_hidden_states_expects_out,  # bf16
-                        shared_output,   # fp16
-                        final_hidden_states,    # fp16
-                        final_hidden_states_expects_out.shape[0] * final_hidden_states_expects_out.shape[1],
-                        self.routed_scaling_factor  # float
-                    )
+                    final_hidden_states_expects_out,  # bf16
+                    shared_output,  # fp16
+                    final_hidden_states,  # fp16
+                    final_hidden_states_expects_out.shape[0]
+                    * final_hidden_states_expects_out.shape[1],
+                    self.routed_scaling_factor,  # float
+                )
             else:
                 final_hidden_states = shared_output
-            
+
         else:
             final_hidden_states = final_hidden_states_expects_out
             if global_server_args_dict["enable_ep_moe_heto"] or not _is_cuda:
@@ -584,7 +599,12 @@ class DeepseekV2MoE(nn.Module):
             n_tokens = state.hidden_states_mlp_input.shape[0]
             if enable_esimd_opt and n_tokens <= 8:
                 # do not call gate and gate is fused w/ topk
-                state.router_logits = torch.empty(shidden_states_mlp_input.shape[0], self.experts.gate_out_features, dtype=shidden_states_mlp_input.dtype, device=shidden_states_mlp_input.device)
+                state.router_logits = torch.empty(
+                    shidden_states_mlp_input.shape[0],
+                    self.experts.gate_out_features,
+                    dtype=shidden_states_mlp_input.dtype,
+                    device=shidden_states_mlp_input.device,
+                )
             else:
                 # router_logits: (num_tokens, n_experts)
                 state.router_logits = self.gate(state.hidden_states_mlp_input)
@@ -653,8 +673,8 @@ class DeepseekV2MoE(nn.Module):
             state.forward_batch.forward_mode is not None
         ) and not state.forward_batch.forward_mode.is_idle():
             if enable_esimd_opt and state.n_tokens <= 8:
-                gpu_result=state.pop("gpu_experts_result")
-                cpu_result=state.pop("cpu_experts_result")
+                gpu_result = state.pop("gpu_experts_result")
+                cpu_result = state.pop("cpu_experts_result")
                 if self.experts.cpu_moe and gpu_result:
                     combined = cpu_result + gpu_result.cpu()
                 elif self.experts.cpu_moe:
@@ -782,12 +802,13 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = torch.empty_like(shared_output)
             if final_hidden_states_expects_out is not None:
                 esimd_mul_scale_factor_and_add(
-                        final_hidden_states_expects_out,  # bf16
-                        shared_output,   # fp16
-                        final_hidden_states,    # fp16
-                        final_hidden_states_expects_out.shape[0] * final_hidden_states_expects_out.shape[1],
-                        self.routed_scaling_factor  # float
-                    )
+                    final_hidden_states_expects_out,  # bf16
+                    shared_output,  # fp16
+                    final_hidden_states,  # fp16
+                    final_hidden_states_expects_out.shape[0]
+                    * final_hidden_states_expects_out.shape[1],
+                    self.routed_scaling_factor,  # float
+                )
             else:
                 final_hidden_states = shared_output
         else:

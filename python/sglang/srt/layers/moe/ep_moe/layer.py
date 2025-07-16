@@ -64,6 +64,7 @@ if _is_hip:
     from vllm._custom_ops import scaled_fp8_quant
 
 import os
+
 enable_esimd_opt = bool(int(os.getenv("ENABLE_ESIMD_TOPK_OPT", "0")))
 if enable_esimd_opt:
     from sgl_kernel_esimd import esimd_kernel_uni
@@ -959,11 +960,32 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
             if self.renormalize:
                 renormalize_weight = 1
             esimd_kernel_uni(
-                router_logits, self.correction_bias, self.cpu_sorted_topk_weights, self.cpu_sorted_topk_ids, 
-                self.cpu_hidden_states, hidden_states, self.gate.weight, hidden_states, hidden_states, hidden_states,
-                1610, self.top_k, self.topk_group, self.num_expert_group, n_tokens, renormalize_weight, 
-                0, 0, 0, 0,
-                self.routed_scaling_factor, 1.0, 1.0, 1.0, 1.0)
+                router_logits,
+                self.correction_bias,
+                self.cpu_sorted_topk_weights,
+                self.cpu_sorted_topk_ids,
+                self.cpu_hidden_states,
+                hidden_states,
+                self.gate.weight,
+                hidden_states,
+                hidden_states,
+                hidden_states,
+                1610,
+                self.top_k,
+                self.topk_group,
+                self.num_expert_group,
+                n_tokens,
+                renormalize_weight,
+                0,
+                0,
+                0,
+                0,
+                self.routed_scaling_factor,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+            )
         else:
             topk_weights, topk_ids = self.select_experts(
                 hidden_states=hidden_states,
@@ -980,7 +1002,7 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
             sorted_topk_weights, sorted_topk_ids = self._sort_topk_ids(
                 topk_weights, topk_ids
             )
-            
+
             if (
                 hidden_states.device.type == "cuda"
                 and torch.cuda.is_current_stream_capturing()
@@ -992,7 +1014,9 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
                 # there cannot be other prepare or enqueue in between
                 # please make sure check operation strategies won't break this assumption
                 self._switch_to_next_tensor_set()
-                self.fill_cpu_tensors(hidden_states, sorted_topk_ids, sorted_topk_weights)
+                self.fill_cpu_tensors(
+                    hidden_states, sorted_topk_ids, sorted_topk_weights
+                )
             else:
                 # FIXME: redundant code
                 # these are safe as only decode will run bto heto

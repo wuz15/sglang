@@ -117,10 +117,32 @@ class RMSNorm(CustomOp):
             add_residual = 1
             residual_in = residual
         esimd_kernel_uni(
-            self.weight, residual_in, hidden_states, hidden_states_out, hidden_states_out, hidden_states_out,
-            hidden_states_out, hidden_states_out, hidden_states_out, hidden_states_out,  # weight, residual, hidden_states
-            1108, hidden_states.shape[-1], seq_len, add_residual, 0, 0, 0, 0, 0, 0, # hidden size, add_residual
-            self.variance_epsilon, 1.0, 1.0, 1.0, 1.0)   # self.variance_epsilon
+            self.weight,
+            residual_in,
+            hidden_states,
+            hidden_states_out,
+            hidden_states_out,
+            hidden_states_out,
+            hidden_states_out,
+            hidden_states_out,
+            hidden_states_out,
+            hidden_states_out,  # weight, residual, hidden_states
+            1108,
+            hidden_states.shape[-1],
+            seq_len,
+            add_residual,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,  # hidden size, add_residual
+            self.variance_epsilon,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+        )  # self.variance_epsilon
         return hidden_states_out
 
     def forward_native(
