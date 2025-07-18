@@ -254,6 +254,10 @@ def biased_grouped_topk_impl(
             gating_output.shape[0], topk, device=gating_output.device, dtype=torch.int32
         )
 
+        flag = 1110
+        if topk_group == 1:
+            flag = 1210
+
         renormalize_weight = 0
         if renormalize:
             renormalize_weight = 1
@@ -268,7 +272,7 @@ def biased_grouped_topk_impl(
             topk_ids_fused,
             topk_ids_fused,
             topk_ids_fused,
-            1110,
+            flag,
             topk,
             topk_group,
             num_expert_group,

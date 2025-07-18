@@ -956,6 +956,10 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
             assert self.need_sort_topk == False
             self._switch_to_next_tensor_set()
 
+            flag = 1610
+            if self.topk_group == 1:
+                flag = 1710
+
             renormalize_weight = 0
             if self.renormalize:
                 renormalize_weight = 1
@@ -970,7 +974,7 @@ class EPMoESparseCPUInfer(EPMoESparseCPUInterface):
                 hidden_states,
                 hidden_states,
                 hidden_states,
-                1610,
+                flag,
                 self.top_k,
                 self.topk_group,
                 self.num_expert_group,
