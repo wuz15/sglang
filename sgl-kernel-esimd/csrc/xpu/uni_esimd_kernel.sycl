@@ -1,0 +1,851 @@
+#include <ATen/ATen.h>
+#include <ATen/Parallel.h>
+#include <c10/xpu/XPUStream.h>
+#include <torch/python.h>
+
+#include <cmath>
+#include <cstdint>
+#include <iostream>
+#include <sycl/sycl.hpp>
+#include <vector>
+
+#include "SYCLHelpers.h"
+#include "esimd_kernels/esimd_add.h"
+#include "esimd_kernels/fp8_GEMV.h"
+#include "esimd_kernels/sdpa_norm.h"
+#include "esimd_kernels/rmsNorm.h"
+#include "esimd_kernels/rotary_pos_emb.h"
+
+void esimd_add(uint8_t* a, uint8_t* b, uint8_t* c, int64_t len, sycl::queue& q){
+    sycl::range<1> LocalRange(16); 
+    sycl::range<1> GlobalRange(len / 128);
+
+    sycl::nd_range<1> Range(GlobalRange, LocalRange);
+    printf("--- global, local: %d, %d\n", 16, len / 128);
+    sycl::event e;
+    try {
+      {
+        e = q.submit([&](handler& cgh) {
+        cgh.parallel_for(Range, [=](nd_item<1> ndi) SYCL_ESIMD_KERNEL{
+              esimd_add_impl(a, b, c, len, ndi);
+            });
+         });
+      }
+    } catch (sycl::exception const &e) {
+      std::cout << "SYCL exception caught: " << e.what() << '\n';
+      return;
+    }
+}
+
+at::Tensor esimd_add(
+    at::Tensor _p0,
+    at::Tensor _p1,
+    at::Tensor _p2,
+
+    int64_t i0
+    )
+    {
+      auto p0 = reinterpret_cast<uint8_t*>(_p0.data_ptr<at::Half>());
+      auto p1 = reinterpret_cast<uint8_t*>(_p1.data_ptr<at::Half>());
+      auto p2 = reinterpret_cast<uint8_t*>(_p2.data_ptr<at::Half>());
+      auto stream = at::xpu::getCurrentXPUStream();
+      auto dpcpp_queue = stream.queue();
+
+      esimd_add(p0, p1, p2, i0, dpcpp_queue);
+
+      return _p2;
+    }
+#define GEMV_A16_WFP8_BLK_PARAMS     \
+  input_data,                        \
+  weight_data,                       \
+  weight_scale_data,                 \
+  bias_data,                         \
+  output_data,                       \
+  M,                                 \
+  N,                                 \
+  K,                                 \
+  batch,                             \
+  has_bias,                          \
+  q                                  \
+
+void GEMV_a16_wfp8_block_host(
+  uint8_t* input_data,
+  uint8_t* weight_data, 
+  uint8_t* weight_scale_data,
+  uint8_t* bias_data,
+  uint8_t* output_data,
+  uint32_t M,
+  uint32_t N,
+  uint32_t K,
+  uint32_t batch,
+  uint32_t scale_block_size_N,
+  uint32_t scale_block_size_K,
+  uint32_t has_bias,
+  sycl::queue& q) {
+
+    // printf("NT is 8 PPG is 8\n");
+
+    // o_proj TP4 4096 to 7168  <fp16, 8, 512, 4, fp16, 128, 128>
+    // fused_qkv_a_proj_with_mqa 7168 to 2112 <fp16, 7, 512, 1, fp16, 128, 128>
+    // q_b_proj 1536 to 32*192  <fp16, 3, 512, 2, fp16, 128, 128>
+    // dense gate_up_proj 7168 to 18432*2/4=9126  <fp16, 8, 512, 4, fp16, 128, 128>
+    // dense down_proj 18432/4=4608 to 7168  <fp16, 9, 512, 4, fp16, 128, 128>
+
+    // template<typename IT, uint32_t NT, uint32_t HD, uint32_t PPG, typename ITS, uint32_t scale_block_size_N, uint32_t scale_block_size_K>
+
+    if (scale_block_size_N == scale_block_size_K && scale_block_size_N == 128)
+    {
+      if (M == 1)
+      {
+        if (K % 512 == 0)
+        {
+          if (K == 7168 && N <= 2112) // fused_qkv_a_proj_with_mqa and gate
+          {
+            GEMV_a16_wfp8_block<fp16, 7, 512, 1, fp16, 128, 128, false, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+          }
+          else if (K == 4096 && N == 7168) // o_proj TP4
+          {
+            GEMV_a16_wfp8_block<fp16, 8, 512, 4, fp16, 128, 128, false, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+          }
+          else if (K == 1536) // q_b_proj
+          {
+            GEMV_a16_wfp8_block<fp16, 3, 512, 2, fp16, 128, 128, false, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+          }
+          else if (K == 7168 && N >= 7168) // dense gate_up_proj
+          {
+            GEMV_a16_wfp8_block<fp16, 14, 512, 2, fp16, 128, 128, false, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+          }
+          else if (K == 4608 && N == 7168) // dense down_proj TP4
+          {
+            GEMV_a16_wfp8_block<fp16, 9, 512, 4, fp16, 128, 128, false, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+          }
+          else if (K == 2048) // v2 lite
+          {
+            GEMV_a16_wfp8_block<fp16, 4, 512, 2, fp16, 128, 128, false, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+          }
+          else
+          {
+            GEMV_a16_wfp8_block<fp16, 8, 512, 2, fp16, 128, 128, false, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+          }
+        }
+        else // K % 256 == 0
+        {
+          GEMV_a16_wfp8_block<fp16, 8, 256, 2, fp16, 128, 128, false, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+      }
+      else if (M == 2)
+      {
+        if (N <= 1024) // gate
+        {
+          GEMV_a16_wfp8_block<fp16, 14, 256, 1, fp16, 128, 128, false, 2>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+        else if (N <= 2112) // fused_qkv_a_proj_with_mqa
+        {
+          GEMV_a16_wfp8_block<fp16, 2, 256, 4, fp16, 128, 128, false, 2>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+        else
+        {
+          GEMV_a16_wfp8_block<fp16, 2, 256, 8, fp16, 128, 128, false, 2>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+      }
+      else if (M <= 4)
+      {
+        if (N <= 1024) // gate
+        {
+          GEMV_a16_wfp8_block<fp16, 14, 256, 1, fp16, 128, 128, false, 4>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+        else if (N <= 2112) // fused_qkv_a_proj_with_mqa and gate
+        {
+          GEMV_a16_wfp8_block<fp16, 2, 256, 4, fp16, 128, 128, false, 4>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+        else
+        {
+          GEMV_a16_wfp8_block<fp16, 2, 256, 8, fp16, 128, 128, false, 4>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+      }
+      else if (M <= 8)
+      {
+        if (N <= 1024) // gate
+        {
+          GEMV_a16_wfp8_block<fp16, 14, 256, 1, fp16, 128, 128, false, 8>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+        else if (N <= 2112) // fused_qkv_a_proj_with_mqa and gate
+        {
+          GEMV_a16_wfp8_block<fp16, 2, 256, 4, fp16, 128, 128, false, 8>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+        else
+        {
+          GEMV_a16_wfp8_block<fp16, 2, 256, 8, fp16, 128, 128, false, 8>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+      }
+      else
+      {
+        std::cout << "[GEMV_a16_wfp8_block] Not supported M N K batch scaleNxK " 
+        << M << " " <<  N << " " << K << " " << batch << " " << scale_block_size_K << "x" << scale_block_size_N << " " << std::endl;
+      }
+    }
+    else
+    {
+      std::cout << "[GEMV_a16_wfp8_block] Not supported M N K batch scaleNxK " 
+        << M << " " <<  N << " " << K << " " << batch << " " << scale_block_size_K << "x" << scale_block_size_N << " " << std::endl;
+    }
+
+  }
+
+void wfp8_dequant_host(
+  uint8_t* weight_data, 
+  uint8_t* weight_scale_data,
+  uint8_t* output_data,
+  uint32_t N,
+  uint32_t K,
+  uint32_t scale_block_size_N,
+  uint32_t scale_block_size_K,
+  sycl::queue& q) {
+    uint8_t* input_data = weight_data;
+    uint8_t* bias_data = weight_data;
+    uint32_t M = 1;
+    uint32_t batch = 1;
+    uint32_t has_bias = 0;
+    // template<typename IT, uint32_t NT, uint32_t HD, uint32_t PPG, typename ITS, uint32_t scale_block_size_N, uint32_t scale_block_size_K>
+    if (scale_block_size_N == scale_block_size_K && scale_block_size_N == 128)
+    {
+      if (K % 512 == 0)
+      {
+        if (K == 7168 && N <= 2112) // fused_qkv_a_proj_with_mqa and gate
+        {
+          GEMV_a16_wfp8_block<fp16, 7, 512, 1, fp16, 128, 128, true, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+        else if (K == 4096 && N == 7168) // o_proj TP4
+        {
+          GEMV_a16_wfp8_block<fp16, 8, 512, 4, fp16, 128, 128, true, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+        else if (K == 1536) // q_b_proj
+        {
+          GEMV_a16_wfp8_block<fp16, 3, 512, 2, fp16, 128, 128, true, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+        else if (K == 7168 && N >= 7168) // dense gate_up_proj
+        {
+          GEMV_a16_wfp8_block<fp16, 14, 512, 2, fp16, 128, 128, true, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+        else if (K == 4608 && N == 7168) // dense down_proj TP4
+        {
+          GEMV_a16_wfp8_block<fp16, 9, 512, 4, fp16, 128, 128, true, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+        else
+        {
+          GEMV_a16_wfp8_block<fp16, 8, 512, 2, fp16, 128, 128, true, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+        }
+      } 
+      else // K % 256 == 0
+      {
+        GEMV_a16_wfp8_block<fp16, 8, 256, 2, fp16, 128, 128, true, 1>(GEMV_A16_WFP8_BLK_PARAMS);
+      }
+    }
+    else
+    {
+      std::cout << "[wfp8_dequant] Not supported N K scaleNxK " 
+        <<  N << " " << K << " " << scale_block_size_K << "x" << scale_block_size_N << " " << std::endl;
+    }
+
+  }
+
+#define BMM_GEMV_A16_WFP8_BLK_PARAMS \
+  input_data,    \
+  weight_data,   \
+  output_data,   \
+  M,             \
+  N,             \
+  K,             \
+  K_stride,      \
+  batch,         \
+  weight_scale,  \
+  q              \
+
+void BMM_GEMV_a16_wfp8_block_host(
+  uint8_t* input_data,
+  uint8_t* weight_data, 
+  uint8_t* output_data,
+  uint32_t M,
+  uint32_t N,
+  uint32_t K,
+  uint32_t K_stride,
+  uint32_t batch,
+  float weight_scale,
+  sycl::queue& q) {
+
+    // template<typename IT, uint32_t NT, uint32_t HD, uint32_t PPG, uint32_t MAX_INPUT_M>
+
+    if (M == 1)
+    {
+      if (K % 512 == 0)
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 256, 1, 1>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+      else // K % 128 == 0
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 128, 1, 1>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+    }
+    else if (M == 2)
+    {
+      if (K % 512 == 0)
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 256, 1, 2>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+      else // K % 128 == 0
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 128, 1, 2>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+    }
+    else if (M <= 4)
+    {
+      if (K % 512 == 0)
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 256, 1, 4>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+      else // K % 128 == 0
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 128, 1, 4>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+    }
+    else if (M <= 8)
+    {
+      if (K % 512 == 0)
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 256, 1, 8>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+      else // K % 128 == 0
+      {
+        BMM_GEMV_a16_wfp8_block<fp16, 1, 128, 1, 8>(BMM_GEMV_A16_WFP8_BLK_PARAMS);
+      }
+    }
+    else
+    {
+      std::cout << "[BMM_GEMV_a16_wfp8_block] Not supported M N K batch " 
+      << M << " " <<  N << " " << K << " " << batch << " " << std::endl;
+    }
+  }
+
+
+
+void esimd_sdpa_normal_with_reduce(
+    uint8_t* query,
+    uint8_t* key,
+    uint8_t* value,
+    uint8_t* kv_indptr, 
+    uint8_t* kv_indices,
+    uint8_t* sdp_tmp,
+    uint8_t* attn_mask,
+    uint8_t* output,
+    int64_t num_heads,
+    int64_t num_heads_kv,
+    int64_t batch_idx,
+    int64_t qk_dim,
+    int64_t v_dim,
+    float attn_scale,
+    float beta,
+    sycl::queue& dpcpp_queue) {
+  if (num_heads % num_heads_kv != 0)
+  {
+    printf("sdpa num_heads & num_heads_kv != 0 !!\n");
+  }
+  if (!(qk_dim == 576 && v_dim == 512 ))
+  {
+    printf("sdpa not support hidden_dim %lld, %lld !!\n", qk_dim, v_dim);
+  }
+  sdp_esimd_kernel_with_reduce_fp16I_fp16O<576, 512, 256>(num_heads, num_heads_kv, batch_idx, query, key, value, (uint32_t*) kv_indptr, (uint32_t*)kv_indices, sdp_tmp, attn_mask, output, attn_scale, beta, dpcpp_queue);
+
+}
+
+void esimd_residual_kernel_rms_norm(
+  uint8_t* weight, uint8_t* residual, uint8_t* hidden_states, uint8_t* hidden_states_out,
+
+  int64_t hidden_size,  // hidden_size
+  int64_t input_len,  // input len
+  int64_t add_residual,  // add residual
+  float variance_epsilon,
+
+  sycl::queue& dpcpp_queue)
+{
+
+// int n_threads = hidden_size / 128;
+{
+  int threads = hidden_size / 128;
+
+  sycl::range<1> GlobalRange(input_len*threads); // input_len
+  sycl::range<1> LocalRange(threads);
+  sycl::nd_range<1> Range(GlobalRange, LocalRange);
+
+  sycl::event e;
+  try {
+    {
+        e = dpcpp_queue.submit([&](handler& cgh) {
+        cgh.parallel_for(Range, [=](nd_item<1> ndi) SYCL_ESIMD_KERNEL{
+          residual_rmsNorm128PerThread_64t(weight, residual, hidden_states, hidden_states_out, hidden_size, input_len, add_residual,  variance_epsilon, ndi);
+          });
+        });
+    }
+  } catch (sycl::exception const &e) {
+    std::cout << "SYCL exception caught: " << e.what() << '\n';
+    return;
+  }
+}
+}
+
+void esimd_residual_kernel_rms_norm_kq(
+  uint8_t* weight_q, uint8_t* weight_k, uint8_t* hidden_states_q, uint8_t* hidden_states_k,
+  uint8_t* hidden_states_out_q, uint8_t* hidden_states_out_k,
+
+  int64_t hidden_size_q,  // hidden_size
+  int64_t hidden_size_k,  // hidden_size
+  int64_t input_len,  // input len
+  float variance_epsilon_q,
+  float variance_epsilon_k,
+
+  sycl::queue& dpcpp_queue)
+{
+
+// int n_threads = hidden_size / 128;
+{
+  int threads_q = hidden_size_q / 128;
+  int threads_k = hidden_size_k / 128;
+  int threads = threads_q + threads_k;
+
+  sycl::range<1> GlobalRange(input_len*threads); // input_len
+  sycl::range<1> LocalRange(threads);
+  sycl::nd_range<1> Range(GlobalRange, LocalRange);
+
+  sycl::event e;
+  try {
+    {
+        e = dpcpp_queue.submit([&](handler& cgh) {
+        cgh.parallel_for(Range, [=](nd_item<1> ndi) SYCL_ESIMD_KERNEL{
+          qk_rmsNorm128PerThread_32t(weight_q, weight_k, hidden_states_q, hidden_states_k, hidden_states_out_q, hidden_states_out_k,
+            hidden_size_q,
+            hidden_size_k,
+            input_len,
+            variance_epsilon_q,
+            variance_epsilon_k, ndi);
+          });
+        });
+    }
+  } catch (sycl::exception const &e) {
+    std::cout << "SYCL exception caught: " << e.what() << '\n';
+    return;
+  }
+}
+}
+
+// gating_output: torch.Tensor,
+//     correction_bias: torch.Tensor,
+//     topk: int,
+//     renormalize: bool,
+//     num_expert_group: int = 0,
+//     topk_group: int = 0,
+//     num_fused_shared_experts: int = 0,
+//     routed_scaling_factor: Optional[float] = None,
+//     num_token_non_padded: Optional[torch.Tensor] = None,
+//     expert_location_dispatch_info: Optional[ExpertLocationDispatchInfo] = None,
+
+void esimd_grouped_topk(
+  uint8_t* gating_output, uint8_t* correction_bias, uint8_t* topk_weights, uint8_t* topk_ids,
+  uint8_t* debug_buffer, uint8_t* debug_buffer_2,
+  int64_t topk_in,
+  int64_t topk_group_in,
+  int64_t num_expert_group_in,
+  int64_t input_len,
+  int64_t renormalize,
+  float routed_scaling_factor,
+
+  sycl::queue& dpcpp_queue)
+{
+  if (!(topk_in == 8 && topk_group_in == 4 && num_expert_group_in == 8))
+  {
+    std::cout << "[esimd_grouped_topk] Not supported topk topk_group num_expert_group " 
+      << topk_in << " " <<  topk_group_in << " " << num_expert_group_in << " " << std::endl;
+    return;
+  }
+
+  // routed_scaling_factor is not used yet
+
+  constexpr uint32_t topk = 8;
+  constexpr uint32_t topk_group = 4;
+  constexpr uint32_t num_expert_group = 8;
+  // assume experts is 256, so each group is 32
+
+  sycl::range<2> GlobalRange(1, input_len*num_expert_group);
+  sycl::range<2> LocalRange(1, num_expert_group);
+  sycl::nd_range<2> Range(GlobalRange, LocalRange);
+
+  dpcpp_queue.submit([&](handler& cgh) {
+    cgh.parallel_for(
+      Range, [=](nd_item<2> ndi) SYCL_ESIMD_KERNEL {
+
+        // (8, 8) top8 for each group for choice   (8, 8) top8 idx for each group  
+        // 8 score for top2 for each group 
+        // (8, 8) top8 for each group real
+        __ESIMD_NS::slm_init(topk * num_expert_group * sizeof(fp16) +
+         topk * num_expert_group * sizeof(int16_t) +
+        num_expert_group * sizeof(fp16) +
+        topk * num_expert_group * sizeof(fp16));
+        
+        constexpr uint32_t top8_idx_for_each_group_offset = num_expert_group*8*sizeof(fp16);
+        constexpr uint32_t groupscore_offset = top8_idx_for_each_group_offset + num_expert_group*8*sizeof(int16_t);
+        constexpr uint32_t realscore_offset = groupscore_offset + num_expert_group * sizeof(fp16);
+
+        int h = ndi.get_group(1);
+        int cnt = ndi.get_local_id(1);
+
+        simd<fp16, 32> input;
+        simd<fp16, 32> input_forchoice;
+        simd<fp16, 32> bias;
+        simd<float, 32> input32;
+        simd<fp16, 8> topkdata;
+        simd<fp16, 8> topkdata_for_choice;
+        topkdata = -INFINITY;
+        topkdata_for_choice = -INFINITY;
+        simd<int16_t, 8> max_k_idx;
+        max_k_idx = -1;
+
+        input.template bit_cast_view<uint8_t>().template select<64, 1>(0) =
+        __ESIMD_ENS::lsc_block_load<
+        uint8_t,
+        64,
+        __ESIMD_ENS::lsc_data_size::default_size,
+        __ESIMD_ENS::cache_hint::cached,
+        __ESIMD_ENS::cache_hint::cached>((uint8_t*)gating_output + h * 32 * num_expert_group * sizeof(fp16) + cnt * 32 * sizeof(fp16));
+
+        bias.template bit_cast_view<uint8_t>().template select<64, 1>(0) =
+        __ESIMD_ENS::lsc_block_load<
+        uint8_t,
+        64,
+        __ESIMD_ENS::lsc_data_size::default_size,
+        __ESIMD_ENS::cache_hint::cached,
+        __ESIMD_ENS::cache_hint::cached>((uint8_t*)correction_bias + cnt * 32 * sizeof(fp16));
+
+
+        // sigmoid
+        input32 = input;
+        input32.select<32, 1>(0) = pow<float, 32, float>(2.718f, (-1.0) * input32.select<32, 1>(0));
+        input32.select<32, 1>(0) = 1.0 / (1.0 + input32.select<32, 1>(0));
+        input = input32;
+
+        input_forchoice = input + bias;
+
+        // top 8 & top 2 sum in group 32 data
+        #pragma unroll
+        for (int j = 0; j < 8; j++)
+        {
+          #pragma unroll
+          for (int k = 0; k < 32; k++)
+          {
+            if (topkdata_for_choice[j] < input_forchoice[k])
+            {
+              topkdata[j] = input[k]; // note, save the data, not for choice.
+              topkdata_for_choice[j] = input_forchoice[k];
+              max_k_idx[j] = k;
+            }
+          }
+          if (max_k_idx[j] >= 0)
+          {
+            input_forchoice[max_k_idx[j]] = -INFINITY;
+          }
+        }
+        max_k_idx += cnt*32;
+        
+        slm_block_store<fp16, 8>(cnt*8*sizeof(fp16), topkdata_for_choice);
+        slm_block_store<int16_t, 8>(top8_idx_for_each_group_offset + cnt*8*sizeof(int16_t), max_k_idx);
+        slm_block_store<fp16, 1>(groupscore_offset + cnt * sizeof(fp16), topkdata_for_choice[0] + topkdata_for_choice[1]);
+        slm_block_store<fp16, 8>(realscore_offset + cnt*8*sizeof(fp16), topkdata);
+
+        barrier(); // -----------------------------------------------
+
+        if (cnt == 0)
+        {
+          topkdata = -INFINITY;
+          simd<fp16, 8> group_score;
+          group_score = slm_block_load<fp16, 8>(groupscore_offset);
+          simd<fp16, 8*4> selected_group_data;
+          simd<fp16, 8*4> selected_group_data_real;
+          simd<fp16, 8*4> selected_group_idx;
+
+          // __ESIMD_ENS::lsc_block_store<
+          //   fp16,
+          //   8,
+          //   __ESIMD_ENS::lsc_data_size::default_size,
+          //   __ESIMD_ENS::cache_hint::write_back,
+          //   __ESIMD_ENS::cache_hint::write_back>((fp16*)debug_buffer + h * 8, group_score);
+          // simd<fp16, 4> group_idx;
+
+          // topk_group is 4
+          // num_expert_group is 8
+
+          int cur_sel_idx = 0;
+
+          // select top 4 group and get data and index of those 4 groups (top8)
+          #pragma unroll
+          for (int j = 0; j < 4; j++)
+          {
+            #pragma unroll
+            for (int k = 0; k < 8; k++)
+            {
+              if (topkdata[j] < group_score[k])
+              {
+                topkdata[j] = group_score[k];
+                cur_sel_idx = k;
+                // group_idx[j] = k;
+              }
+            }
+            if (cur_sel_idx >= 0)
+            {
+              // select cur_sel_idx th group and set to j th GRF.
+              selected_group_data.select<8, 1>(j*8) = slm_block_load<fp16, 8>(cur_sel_idx*8*sizeof(fp16));
+              selected_group_data_real.select<8, 1>(j*8) = slm_block_load<fp16, 8>(realscore_offset + cur_sel_idx*8*sizeof(fp16));
+              selected_group_idx.select<8, 1>(j*8) = slm_block_load<int16_t, 8>(top8_idx_for_each_group_offset + cur_sel_idx*8*sizeof(int16_t));
+              group_score[cur_sel_idx] = -INFINITY;
+            }
+          }
+
+          // __ESIMD_ENS::lsc_block_store<
+          //   int32_t,
+          //   4,
+          //   __ESIMD_ENS::lsc_data_size::default_size,
+          //   __ESIMD_ENS::cache_hint::write_back,
+          //   __ESIMD_ENS::cache_hint::write_back>((int32_t*)debug_buffer_2 + h * 4, group_idx);
+
+          max_k_idx = 0; // avoid the issue
+          topkdata_for_choice = -INFINITY;
+          topkdata = -INFINITY;
+
+          // finally find top8
+          #pragma unroll
+          for (int j = 0; j < 8; j++)
+          {
+            #pragma unroll
+            for (int k = 0; k < 4*8; k++)
+            {
+              if (topkdata_for_choice[j] < selected_group_data[k])
+              {
+                topkdata_for_choice[j] = selected_group_data[k];
+                topkdata[j] = selected_group_data_real[k];  // get from real data, but sort by for choice data
+                max_k_idx[j] = selected_group_idx[k];
+                cur_sel_idx = k;
+              }
+            }
+            if (cur_sel_idx >= 0)
+            {
+              selected_group_data[cur_sel_idx] = -INFINITY;
+            }
+          }
+
+          if (renormalize)
+          {
+            simd<fp16, 8> topkdata_tmp;
+            topkdata_tmp = topkdata;
+            topkdata_tmp.select<4, 1>(0) += topkdata_tmp.select<4, 1>(4);
+            topkdata_tmp.select<2, 1>(0) += topkdata_tmp.select<2, 1>(2);
+            topkdata_tmp[0] += topkdata_tmp[1];
+
+            fp16 sumdata = topkdata_tmp[0];
+
+            topkdata = topkdata / sumdata;
+          }
+
+          __ESIMD_ENS::lsc_block_store<
+            float,
+            8,
+            __ESIMD_ENS::lsc_data_size::default_size,
+            __ESIMD_ENS::cache_hint::write_back,
+            __ESIMD_ENS::cache_hint::write_back>((float*)topk_weights + 8 * h, topkdata.select<8, 1>(0));
+          __ESIMD_ENS::lsc_block_store<
+            int32_t,
+            8,
+            __ESIMD_ENS::lsc_data_size::default_size,
+            __ESIMD_ENS::cache_hint::write_back,
+            __ESIMD_ENS::cache_hint::write_back>((int32_t*)topk_ids + 8 * h, max_k_idx.select<8, 1>(0));
+        }
+      
+      });
+  });
+
+
+}
+
+void esimd_rotary_pos_emb_ds(uint8_t* qState, uint8_t* kState, uint8_t* cos_sin_cache, uint8_t* positions, uint8_t* offsets,
+ int num_heads_q, int hidden_dim_q, int hd_stride_q,
+ int num_heads_kv, int hidden_dim_kv, int hd_stride_kv, int head_hd_stride_kv, int input_len, int has_offset, sycl::queue& dpcpp_queue) {
+ 
+  // printf("input_len = %d", (int)input_len);
+  sycl::range<2> GlobalRange(input_len, num_heads_q + num_heads_kv);
+  sycl::range<2> LocalRange(1, 1);
+  sycl::nd_range<2> Range(GlobalRange, LocalRange);
+  static int callCount = 0;
+  // printf("---------- esimd_rotary_pos_emb, GlobalRange: %d, %d ----------\n", num_heads_q + num_heads_kv, 1 );
+  // currently only support hidden_dim_q and hidden_dim_kv 64
+ 
+  sycl::event e;
+  try {
+    e = dpcpp_queue.submit([&](handler& cgh) {
+        cgh.parallel_for(Range, [=](nd_item<2> ndi) SYCL_ESIMD_KERNEL{
+          rotary_pos_emb_ds(qState, kState, cos_sin_cache, positions, offsets, 
+            num_heads_q, hidden_dim_q, hd_stride_q, num_heads_kv, hidden_dim_kv, hd_stride_kv, head_hd_stride_kv, has_offset, ndi);
+      });
+    });
+  } catch (sycl::exception const &e) {
+    std::cout << "SYCL exception caught: " << e.what() << '\n';
+    return;
+  }
+ 
+}
+
+
+ void esimd_updateKV_indexed(
+  uint8_t* kv_cache, uint8_t* loc, uint8_t* kv_input,
+  int64_t kv_hd,
+  int64_t kv_stride,
+  int64_t update_len,
+
+  sycl::queue& dpcpp_queue)
+{
+  // only support one kv head for MLA
+
+  // int n_threads = (kv_hd + 127) / 128;
+  // int hd_last_thread = kv_hd % 128;
+  // if (hd_last_thread == 0) hd_last_thread = 128;
+
+  constexpr int n_threads = 5;
+  constexpr int hd_last_thread = 64;
+
+  sycl::range<1> GlobalRange(update_len*n_threads);
+  sycl::range<1> LocalRange(n_threads);
+  sycl::nd_range<1> Range(GlobalRange, LocalRange);
+
+  dpcpp_queue.submit([&](handler& cgh) {
+    cgh.parallel_for(
+      Range, [=](nd_item<1> ndi) SYCL_ESIMD_KERNEL {
+
+        int h = ndi.get_group(0);
+        int hh = ndi.get_local_id(0);
+
+        uint64_t outh = ((uint64_t*)loc)[h];
+
+        simd<fp16, 128> input;
+
+        if (hh != (n_threads-1))
+        {
+          input.template bit_cast_view<uint8_t>().template select<256, 1>(0) =
+            __ESIMD_ENS::lsc_block_load<
+            uint8_t,
+            256,
+            __ESIMD_ENS::lsc_data_size::default_size,
+            __ESIMD_ENS::cache_hint::cached,
+            __ESIMD_ENS::cache_hint::cached>((uint8_t*)kv_input + (h * kv_stride + hh * 128) * sizeof(fp16));
+
+          __ESIMD_ENS::lsc_block_store<
+            fp16,
+            128,
+            __ESIMD_ENS::lsc_data_size::default_size,
+            __ESIMD_ENS::cache_hint::write_back,
+            __ESIMD_ENS::cache_hint::write_back>((fp16*)kv_cache + outh * kv_hd + hh * 128, input.select<128, 1>(0));
+        }
+        else
+        {
+          input.template bit_cast_view<uint8_t>().template select<128, 1>(0) =
+            __ESIMD_ENS::lsc_block_load<
+            uint8_t,
+            128,
+            __ESIMD_ENS::lsc_data_size::default_size,
+            __ESIMD_ENS::cache_hint::cached,
+            __ESIMD_ENS::cache_hint::cached>((uint8_t*)kv_input + (h * kv_stride + hh * 128) * sizeof(fp16));
+
+          __ESIMD_ENS::lsc_block_store<
+            fp16,
+            64,
+            __ESIMD_ENS::lsc_data_size::default_size,
+            __ESIMD_ENS::cache_hint::write_back,
+            __ESIMD_ENS::cache_hint::write_back>((fp16*)kv_cache + outh * kv_hd + hh * 128, input.select<64, 1>(0));
+        }
+      
+      });
+  });
+
+
+}
+
+at::Tensor esimd_kernel_uni(
+    at::Tensor _p0,
+    at::Tensor _p1,
+    at::Tensor _p2,
+    at::Tensor _p3,
+    at::Tensor _p4,
+    at::Tensor _p5,
+    at::Tensor _p6,
+    at::Tensor _p7,
+    at::Tensor _p8,
+    at::Tensor _p9,
+
+    int64_t i0,
+    int64_t i1,
+    int64_t i2,
+    int64_t i3,
+    int64_t i4,
+    int64_t i5,
+    int64_t i6,
+    int64_t i7,
+    int64_t i8,
+    int64_t i9,
+
+    double f0,
+    double f1,
+    double f2,
+    double f3,
+    double f4
+    )
+    {
+    auto p0 = reinterpret_cast<uint8_t*>(_p0.data_ptr());
+    auto p1 = reinterpret_cast<uint8_t*>(_p1.data_ptr());
+    auto p2 = reinterpret_cast<uint8_t*>(_p2.data_ptr());
+    auto p3 = reinterpret_cast<uint8_t*>(_p3.data_ptr());
+    auto p4 = reinterpret_cast<uint8_t*>(_p4.data_ptr());
+    auto p5 = reinterpret_cast<uint8_t*>(_p5.data_ptr());
+    auto p6 = reinterpret_cast<uint8_t*>(_p6.data_ptr());
+    auto p7 = reinterpret_cast<uint8_t*>(_p7.data_ptr());
+    auto p8 = reinterpret_cast<uint8_t*>(_p8.data_ptr());
+    auto p9 = reinterpret_cast<uint8_t*>(_p9.data_ptr());
+    auto stream = at::xpu::getCurrentXPUStream();
+    auto dpcpp_queue = stream.queue();
+
+      switch(i0){
+        case 5000:
+          GEMV_a16_wfp8_block_host(p0, p1, p2, p3, p4, i1, i2, i3, i4, i5, i6, i7, dpcpp_queue);
+        break;
+        case 4999:
+          wfp8_dequant_host(p0, p1, p2, i1, i2, i3, i4, dpcpp_queue);
+        break;
+        case 5001:
+          BMM_GEMV_a16_wfp8_block_host(p0, p1, p2, i1, i2, i3, i4, i5, f0, dpcpp_queue);
+        break;
+        case 1013: 
+          esimd_sdpa_normal_with_reduce(p0, p1, p2, p3, p4, p5, p6, p7, i1, i2, i3, i4, i5, f0, f1, dpcpp_queue);
+        break;
+        case 1108:   // rms norm w/ residual add
+          esimd_residual_kernel_rms_norm(p0, p1, p2, p3, i1, i2, i3, f0, dpcpp_queue);
+        break;
+        case 1109:   // rms norm w/ residual add
+          esimd_residual_kernel_rms_norm_kq(p0, p1, p2, p3, p4, p5, i1, i2, i3, f0, f1, dpcpp_queue);
+        break;
+        case 1110:
+          esimd_grouped_topk(p0, p1, p2, p3, p4, p5, i1, i2, i3, i4, i5, f0, dpcpp_queue);
+        break;
+        case 1111:
+          esimd_rotary_pos_emb_ds(p0, p1, p2, p3, p4, i1, i2, i3, i4, i5, i6, i7, i8, i9, dpcpp_queue);
+        break;
+        case 1112:
+          esimd_updateKV_indexed(p0, p1, p2, i1, i2, i3, dpcpp_queue);
+        break;
+        default:
+          printf("---------- esimd kernel op not supported, op is %lld ----------\n", i0);
+        break;
+      }
+      return _p9;
+    }

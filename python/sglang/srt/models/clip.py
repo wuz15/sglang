@@ -463,7 +463,7 @@ class CLIPModel(nn.Module):
         if forward_batch.mm_inputs is not None:
             mm_inputs = forward_batch.mm_inputs
         pixel_values_list = [
-            item.feature
+            item.pixel_values
             for item in flatten_nested_list(
                 [mm_input.mm_items for mm_input in mm_inputs if mm_input is not None]
             )

@@ -1,17 +1,17 @@
 from torch import nn
 
-from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_hip, is_npu
+from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_hip, use_cpu
 
 _is_cuda = is_cuda()
 _is_hip = is_hip()
 _is_cpu = is_cpu()
-_is_cpu_amx_available = cpu_has_amx_support()
-_is_npu = is_npu()
+_is_cpu_amx = cpu_has_amx_support()
 
 
 class CustomOp(nn.Module):
     def __init__(self):
         super().__init__()
+        self.use_cpu = use_cpu()
         self._forward_method = self.dispatch_forward()
 
         # States for torch.compile
@@ -29,18 +29,15 @@ class CustomOp(nn.Module):
 
         self._original_forward_method = self._forward_method
         # NOTE: Temporarily workaround MoE
-        # The performance of torch.compile on this layer is not always good when bs > 1,
-        # so we decide to only use torch.compile when bs=1
         if "FusedMoE" in self.__class__.__name__:
             if num_tokens == 1:
                 from sglang.srt.layers.moe.fused_moe_native import (
                     fused_moe_forward_native,
                 )
 
+                # The performance of torch.compile on this layer is not always good when bs > 1,
+                # so we decide to only use torch.compile when bs =1
                 self._forward_method = fused_moe_forward_native
-        elif "TopK" in self.__class__.__name__:
-            if num_tokens == 1:
-                self._forward_method = self.forward_native
         else:
             self._forward_method = self.forward_native
         self.is_torch_compile = True
@@ -64,9 +61,6 @@ class CustomOp(nn.Module):
     def forward_cuda(self, *args, **kwargs):
         raise NotImplementedError
 
-    def forward_npu(self, *args, **kwargs):
-        raise NotImplementedError
-
     def forward_hip(self, *args, **kwargs):
         return self.forward_cuda(*args, **kwargs)
 
@@ -84,9 +78,7 @@ class CustomOp(nn.Module):
             return self.forward_cuda
         elif _is_hip:
             return self.forward_hip
-        elif _is_cpu and _is_cpu_amx_available:
+        elif _is_cpu and self.use_cpu and _is_cpu_amx:
             return self.forward_cpu
-        elif _is_npu:
-            return self.forward_npu
         else:
             return self.forward_native

@@ -62,7 +62,6 @@ The core features include:
    backend/quantization.md
    backend/lora.ipynb
    backend/pd_disaggregation.md
-   backend/vlm_query.ipynb
 
 .. toctree::
    :maxdepth: 1

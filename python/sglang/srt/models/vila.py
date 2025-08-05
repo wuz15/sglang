@@ -17,11 +17,7 @@ from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorO
 from sglang.srt.layers.pooler import Pooler, PoolingType
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.managers.mm_utils import MultiModalityDataPaddingPatternMultimodalTokens
-from sglang.srt.managers.schedule_batch import (
-    Modality,
-    MultimodalDataItem,
-    MultimodalInputs,
-)
+from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.models.qwen2 import Qwen2ForCausalLM
 
@@ -227,9 +223,7 @@ class VILAForConditionalGeneration(nn.Module):
             input_ids=input_ids,
             forward_batch=forward_batch,
             language_model=self.llm,
-            data_embedding_funcs={
-                Modality.IMAGE: self.get_image_feature,
-            },
+            image_data_embedding_func=self.get_image_feature,
             get_embedding=get_embedding,
             positions=positions,
         )
@@ -237,7 +231,7 @@ class VILAForConditionalGeneration(nn.Module):
         return cast(LogitsProcessorOutput, output)
 
     def get_image_feature(self, mm_input: List[MultimodalDataItem]) -> Tensor:
-        pixel_values = cast(Tensor, mm_input[0].feature)
+        pixel_values = cast(Tensor, mm_input[0].pixel_values)
 
         ##### BEGIN COPY modeling_vila.py #####
 
@@ -276,10 +270,15 @@ class VILAForConditionalGeneration(nn.Module):
                 weight_loader(param, loaded_weight)
 
     def pad_input_ids(
-        self, input_ids: List[int], mm_inputs: MultimodalInputs
+        self,
+        input_ids: List[int],
+        image_inputs: MultimodalInputs,
     ) -> List[int]:
-        pattern = MultiModalityDataPaddingPatternMultimodalTokens()
-        return pattern.pad_input_tokens(input_ids, mm_inputs)
+        pattern = MultiModalityDataPaddingPatternMultimodalTokens(
+            token_ids=[self.config.image_token_id],
+        )
+
+        return pattern.pad_input_tokens(input_ids, image_inputs)
 
     ##### BEGIN COPY modeling_vila.py #####
 
