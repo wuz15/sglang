@@ -20,7 +20,6 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import PretrainedConfig
 
 from sglang.srt.custom_op import CustomOp
 from sglang.srt.distributed import (
@@ -29,29 +28,13 @@ from sglang.srt.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.utils import (
-    cpu_has_amx_support,
-    is_cpu,
-    is_cuda,
-    is_hip,
-    is_npu,
-    set_weight_attrs,
-)
-from sglang.utils import resolve_obj_by_qualname
+from sglang.srt.utils import cpu_has_amx_support, is_cuda, set_weight_attrs
 
 _is_cuda = is_cuda()
-_is_npu = is_npu()
-_is_cpu_amx_available = cpu_has_amx_support()
-_is_cpu = is_cpu()
-_is_hip = is_hip()
+_is_cpu_amx = cpu_has_amx_support()
 
 if _is_cuda:
     from sgl_kernel import gelu_and_mul, gelu_tanh_and_mul, silu_and_mul
-elif _is_hip:
-    from sgl_kernel import gelu_and_mul, gelu_quick, gelu_tanh_and_mul, silu_and_mul
-
-if is_npu():
-    import torch_npu
 
 logger = logging.getLogger(__name__)
 
@@ -69,17 +52,13 @@ class SiluAndMul(CustomOp):
         return out
 
     def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
-        if _is_cpu_amx_available:
+        if _is_cpu_amx:
             d = x.shape[-1] // 2
             output_shape = x.shape[:-1] + (d,)
             out = torch.ops.sgl_kernel.silu_and_mul_cpu(x)
             return out
         else:
             return self.forward_native(x)
-
-    def forward_npu(self, x: torch.Tensor) -> torch.Tensor:
-        out = torch_npu.npu_swiglu(x)
-        return out
 
 
 class GeluAndMul(CustomOp):
@@ -114,28 +93,13 @@ class NewGELU(CustomOp):
         return self.forward_native(x)
 
 
-class ReLU2(nn.Module):
-    """
-    Applies the squared Rectified Linear Unit function.
-    y = max(0, x)^2
-    """
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.relu(x)
-        return x * x
-
-
 class QuickGELU(CustomOp):
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         return x * torch.sigmoid(1.702 * x)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        # TODO(zhyncs): Implement the CUDA kernel for QuickGELU in sgl-kernel
         return self.forward_native(x)
-
-    def forward_hip(self, x: torch.Tensor) -> torch.Tensor:
-        out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
-        gelu_quick(x, out)
-        return out
 
 
 class ScaledActivation(nn.Module):
@@ -183,8 +147,6 @@ class ScaledActivation(nn.Module):
 _ACTIVATION_REGISTRY = {
     "gelu": nn.GELU(),
     "gelu_pytorch_tanh": nn.GELU(approximate="tanh"),
-    "gelu_new": NewGELU(),
-    "relu2": ReLU2(),
 }
 
 
@@ -213,25 +175,8 @@ def get_act_fn(
     return act_fn
 
 
-def get_cross_encoder_activation_function(config: PretrainedConfig):
-    if (
-        hasattr(config, "sbert_ce_default_activation_function")
-        and config.sbert_ce_default_activation_function is not None
-    ):
-
-        function_name = config.sbert_ce_default_activation_function
-        assert function_name.startswith("torch.nn.modules."), (
-            "Loading of activation functions is restricted to "
-            "torch.nn.modules for security reasons"
-        )
-        return resolve_obj_by_qualname(function_name)()
-    else:
-        # adapt bge-reranker
-        return nn.Identity()
-
-
-if not (_is_cuda or _is_npu or (_is_cpu and _is_cpu_amx_available) or _is_hip):
-    logger.info(
-        "sgl-kernel is not available on Non-NV, Non-AMD platforms or Non-AMX CPUs. Fallback to other kernel libraries."
-    )
-    from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul
+# if not (_is_cuda or _is_cpu_amx):
+#     logger.info(
+#         "sgl-kernel is not available on Non-NV platforms or Non-AMX CPUs. Fallback to other kernel libraries."
+#     )
+#     from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul

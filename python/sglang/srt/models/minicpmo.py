@@ -32,7 +32,7 @@ from transformers.activations import ACT2FN
 from transformers.cache_utils import DynamicCache, EncoderDecoderCache
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from transformers.models.whisper.modeling_whisper import (
-    WhisperAttention,
+    WHISPER_ATTENTION_CLASSES,
     WhisperConfig,
     WhisperEncoder,
 )
@@ -1090,7 +1090,7 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
     def __init__(self, config: WhisperConfig, layer_idx: int = None):
         super().__init__()
         self.embed_dim = config.d_model
-        self.self_attn = WhisperAttention(
+        self.self_attn = WHISPER_ATTENTION_CLASSES[config._attn_implementation](
             embed_dim=self.embed_dim,
             num_heads=config.encoder_attention_heads,
             dropout=config.attention_dropout,
@@ -1134,10 +1134,7 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
         """
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        # TODO (lifuhuang): confirmed with Mick that the logic for past_key_values is copied from minicpmo official code,
-        # currently we are not using past_key_values at all. We need to redesign the caching logic when we support streaming
-        # in the future.
-        hidden_states, attn_weights = self.self_attn(
+        hidden_states, attn_weights, past_key_values = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             layer_head_mask=layer_head_mask,
@@ -1555,7 +1552,9 @@ class MiniCPMO(MiniCPMBaseModel):
         Returns:
             List[List[torch.Tensor]]: audio embeddings
         """
-        wavforms = flatten_nested_list([item.feature for item in items if item.feature])
+        wavforms = flatten_nested_list(
+            [item.audio_features for item in items if item.audio_features]
+        )
         # list, [[x1, x2], [y1], [z1]]
         audio_feature_lens_raw = flatten_nested_list(
             [item.audio_feature_lens for item in items if item.audio_feature_lens]
@@ -1660,7 +1659,9 @@ class MiniCPMO(MiniCPMBaseModel):
             List[List[torch.Tensor]]: audio embeddings
         """
         # (bs, 80, frames) or [], multi audios need filled in advance
-        wavforms = flatten_nested_list([item.feature for item in items if item.feature])
+        wavforms = flatten_nested_list(
+            [item.audio_features for item in items if item.audio_features]
+        )
         # list, [[x1, x2], [y1], [z1]]
         audio_feature_lens_raw = flatten_nested_list(
             [item.audio_feature_lens for item in items if item.audio_feature_lens]
@@ -1777,7 +1778,7 @@ class MiniCPMO(MiniCPMBaseModel):
 
     def get_image_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
         # list of tensors
-        pixel_values = flatten_nested_list([item.feature for item in items])
+        pixel_values = flatten_nested_list([item.pixel_values for item in items])
         tgt_sizes = torch.stack(
             flatten_nested_list([item.tgt_size for item in items]), dim=0
         )
@@ -1826,7 +1827,8 @@ class MiniCPMO(MiniCPMBaseModel):
             input_ids=input_ids,
             forward_batch=forward_batch,
             language_model=self.llm,
-            multimodal_model=self,
+            image_data_embedding_func=self.get_image_feature,
+            audio_data_embedding_func=self.get_audio_feature,
             positions=positions,
         )
         return hidden_states

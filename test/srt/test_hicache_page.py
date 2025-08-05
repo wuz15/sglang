@@ -26,7 +26,7 @@ class TestHiCachePage(CustomTestCase):
                 "--page-size",
                 32,
                 "--hicache-write-policy",
-                "write_back",
+                "write-back",
             ],
         )
 
