@@ -1,10 +1,11 @@
 from dataclasses import dataclass
+from enum import IntEnum, auto
 from typing import List, Optional
 
 import torch
 
 from sglang.srt import operations
-from sglang.srt.layers.moe.token_dispatcher import DeepEPConfig
+from sglang.srt.layers.moe.ep_moe.token_dispatcher import DeepEPConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.operations import Operation
 
@@ -28,11 +29,9 @@ class OperationsStrategy:
         )
 
     @staticmethod
-    def init_new_tbo(
-        layers: torch.nn.ModuleList,
-        forward_mode: ForwardMode,
+    def _init_new_tbo_deepep(
+        layer_name: str, layers: torch.nn.ModuleList, forward_mode: ForwardMode
     ) -> "OperationsStrategy":
-        layer_name = layers[0].__class__.__name__
         if layer_name == "DeepseekV2DecoderLayer":
             return OperationsStrategy.concat(
                 [
@@ -54,6 +53,44 @@ class OperationsStrategy:
         else:
             raise NotImplementedError
 
+    @staticmethod
+    def _init_new_tbo_heto(
+        layer_name: str, layers: torch.nn.ModuleList, forward_mode: ForwardMode
+    ) -> "OperationsStrategy":
+        if layer_name == "DeepseekV2DecoderLayer":
+            return OperationsStrategy.concat(
+                [
+                    _compute_moe_deepseek_layer_operations_strategy_tbo_heto(
+                        layer, forward_mode
+                    )
+                    for layer in layers
+                ]
+            )
+        else:
+            raise NotImplementedError(
+                f"Hetopipe TBO not implemented for layer {layer_name} in forward mode {forward_mode}"
+            )
+
+    @staticmethod
+    def init_new_tbo(
+        layers: torch.nn.ModuleList,
+        forward_mode: ForwardMode,
+        tbo_mode: Optional[str] = None,
+    ) -> "OperationsStrategy":
+        layer_name = layers[0].__class__.__name__
+        if tbo_mode == "deepep":
+            return OperationsStrategy._init_new_tbo_deepep(
+                layer_name, layers, forward_mode
+            )
+        elif tbo_mode == "heto":
+            return OperationsStrategy._init_new_tbo_heto(
+                layer_name, layers, forward_mode
+            )
+        else:
+            raise NotImplementedError(
+                f"TBO mode {tbo_mode} not implemented for layer {layer_name} in forward mode {forward_mode}"
+            )
+
 
 def _assert_all_same(items: List):
     assert all(item == items[0] for item in items)
@@ -71,9 +108,7 @@ def _compute_moe_deepseek_layer_operations_strategy_tbo(
     assert layer.is_layer_sparse, "dense layer TBO not yet implemented"
     if forward_mode == ForwardMode.EXTEND:
         return _compute_moe_deepseek_blog_prefill(layer)
-    elif (
-        forward_mode == ForwardMode.DECODE or forward_mode == ForwardMode.TARGET_VERIFY
-    ):
+    elif forward_mode == ForwardMode.DECODE:
         return _compute_moe_deepseek_blog_decode(layer)
     else:
         raise NotImplementedError(f"Unsupported {forward_mode=}")
@@ -148,9 +183,7 @@ def _compute_moe_qwen3_layer_operations_strategy_tbo(
     assert layer.is_layer_sparse, "qwen3 moe only support sparse layers"
     if forward_mode == ForwardMode.EXTEND:
         return _compute_moe_qwen3_prefill(layer)
-    elif (
-        forward_mode == ForwardMode.DECODE or forward_mode == ForwardMode.TARGET_VERIFY
-    ):
+    elif forward_mode == ForwardMode.DECODE:
         return _compute_moe_qwen3_decode(layer)
     else:
         raise NotImplementedError(f"Unsupported {forward_mode=}")
@@ -207,5 +240,41 @@ def _compute_moe_qwen3_decode(layer):
             layer.mlp.op_output,
             layer.op_comm_postprocess_layer,
             operations.YieldOperation(),
+        ],
+    )
+
+
+# -------------------------------- Strategy for DeepSeek Heto------------------------------------
+
+
+# TODO can refactor to make it more fancy if we have more complex strategies
+def _compute_moe_deepseek_layer_operations_strategy_tbo_heto(
+    layer: torch.nn.Module,
+    forward_mode: ForwardMode,
+) -> OperationsStrategy:
+    assert layer.is_layer_sparse, "dense layer TBO not yet implemented"
+    return _compute_moe_deepseek_decode_heto(layer)
+
+
+def _compute_moe_deepseek_decode_heto(layer):
+    return OperationsStrategy(
+        tbo_delta_stages=1,
+        operations=[
+            layer.op_comm_prepare_attn,
+            layer.self_attn.op_prepare,
+            layer.self_attn.op_core,
+            layer.op_comm_prepare_mlp,
+            layer.mlp.op_gate,
+            layer.mlp.op_prepare_experts,
+            operations.YieldOperation(),
+            layer.mlp.op_enqueue_experts,
+            layer.mlp.op_shared_experts_keep_state,
+            layer.mlp.op_enqueue_experts_maybe_gpu,
+            operations.YieldOperation(),
+            layer.mlp.op_sync_experts,
+            operations.YieldOperation(),
+            layer.mlp.op_combine_heto_experts,
+            layer.mlp.op_output,
+            layer.op_comm_postprocess_layer,
         ],
     )

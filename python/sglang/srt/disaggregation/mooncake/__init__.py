@@ -1,4 +1,4 @@
-from sglang.srt.disaggregation.mooncake.conn import (
+from .conn import (
     MooncakeKVBootstrapServer,
     MooncakeKVManager,
     MooncakeKVReceiver,

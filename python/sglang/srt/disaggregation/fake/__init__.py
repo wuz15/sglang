@@ -1,1 +1,1 @@
-from sglang.srt.disaggregation.fake.conn import FakeKVReceiver, FakeKVSender
+from .conn import FakeKVReceiver, FakeKVSender
