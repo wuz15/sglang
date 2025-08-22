@@ -1425,13 +1425,13 @@ class DeepseekV2AttentionMLA(nn.Module):
             )
         else:
             if enable_esimd_bmm_opt and q_nope.shape[0] <= 8:
-                if self.print_bmm_kc is False:
+                if self.print_bmm_kc is True:
                     print(
                         "fp8_bmm_esimd opt, q_nope, w_kc: ",
                         q_nope.shape,
                         self.w_kc_fp8.shape,
                     )
-                    self.print_bmm_kc = True
+                    # self.print_bmm_kc = True
                 q_nope_out = self.fp8_bmm_opt(q_nope, self.w_kc_fp8, self.w_scale_item)
             else:
                 q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
@@ -1512,13 +1512,13 @@ class DeepseekV2AttentionMLA(nn.Module):
             )
         else:
             if enable_esimd_bmm_opt and attn_output.shape[0] <= 8:
-                if self.print_bmm_vc is False:
+                if self.print_bmm_vc is True:
                     print(
                         "fp8_bmm_esimd opt, attn_output, w_vc: ",
                         attn_output.shape,
                         self.w_vc_fp8.shape,
                     )
-                    self.print_bmm_vc = True
+                    # self.print_bmm_vc = True
                 attn_bmm_output = self.fp8_bmm_opt(
                     attn_output, self.w_vc_fp8, self.w_scale_item
                 )

@@ -469,9 +469,9 @@ class Fp8LinearMethod(LinearMethodBase):
             bias_in = bias
 
         if M > 8:  # GEMM not GEMV
-            if not self.printed_info_gemm:
+            if self.printed_info_gemm:
                 print("running fp8 esimd GEMM opt kernel: M, N, K", M, " ", N, " ", K)
-                self.printed_info_gemm = True
+                # self.printed_info_gemm = True
 
             dq_weight_fp16 = torch.empty(
                 weight.shape, dtype=torch.float16, device=weight.device
@@ -510,9 +510,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 output = torch.matmul(input, dq_weight_fp16.transpose(0, 1))
             return output
 
-        if not self.printed_info_gemv:
+        if self.printed_info_gemv:
             print("running fp8 esimd GEMV opt kernel: M, N, K", M, " ", N, " ", K)
-            self.printed_info_gemv = True
+            # self.printed_info_gemv = True
 
         batch = 1
         if len(input.shape) == 4:
